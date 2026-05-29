@@ -2,14 +2,16 @@
   "name": "remote-agent-worker",
   "version": "0.1.0",
   "private": true,
-  "main": "dist/poll.js",
+  "main": "dist/worker/src/main.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/poll.js"
+    "start": "node dist/worker/src/main.js",
+    "test": "vitest run"
   },
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "typescript": "^5.4.0"
+    "typescript": "^5.4.0",
+    "vitest": "^1.6.0"
   }
 }

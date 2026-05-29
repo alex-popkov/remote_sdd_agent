@@ -1,6 +1,7 @@
+# Build context is the repo root (configured in docker-compose).
 FROM node:20-bookworm-slim
 
-# Install git, gh CLI, and curl for general use
+# Install git, gh CLI, and curl. gh's apt repo needs gnupg + a keyring setup.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -14,16 +15,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install claude-code globally
+# Install the claude CLI globally — used by the worker pipeline (M5+).
 RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm install --production
+# Bring in shared types alongside the worker source.
+COPY shared/ ./shared/
 
-COPY tsconfig.json ./
-COPY src ./src
+COPY worker/package.json worker/package-lock.json* ./worker/
+WORKDIR /app/worker
+RUN npm install --omit=dev
+
+COPY worker/tsconfig.json ./
+COPY worker/src ./src
 RUN npm install typescript --no-save && npx tsc
 
-CMD ["node", "dist/poll.js"]
+WORKDIR /app
+
+# tsc with include ["src/**/*", "../shared/src/**/*"] places output at
+# dist/worker/src/main.js (rootDir is auto-inferred to /app).
+CMD ["node", "worker/dist/worker/src/main.js"]

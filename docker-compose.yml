@@ -1,6 +1,8 @@
 services:
   receiver:
-    build: ./receiver
+    build:
+      context: .
+      dockerfile: receiver/Dockerfile
     container_name: remote-agent-receiver
     restart: unless-stopped
     ports:
@@ -8,8 +10,8 @@ services:
     env_file:
       - .env
     volumes:
-      # Shared queue: receiver writes, worker reads.
-      - ./workspace/queue:/queue
+      # Single shared workspace mount — queue/, runs/, and state/ live here.
+      - ./workspace:/workspace
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
       interval: 30s
@@ -17,14 +19,15 @@ services:
       retries: 3
 
   worker:
-    build: ./worker
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
     container_name: remote-agent-worker
     restart: unless-stopped
     env_file:
       - .env
     volumes:
-      - ./workspace/queue:/queue
-      - ./workspace/runs:/runs
+      - ./workspace:/workspace
       - ./pipeline:/pipeline:ro
     # Worker depends on receiver only for startup order; it polls the queue
     # independently and survives receiver restarts.

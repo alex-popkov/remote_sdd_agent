@@ -36,6 +36,9 @@ coverage/
 **/.DS_Store
 Thumbs.db
 
-# Runtime workspace (queue + per-run repos/artifacts/logs)
-workspace/queue/
-workspace/runs/
+# Runtime workspace (queue + per-run repos/artifacts/logs + dedupe state)
+# Keep dirs themselves (via .gitkeep) but ignore their contents.
+workspace/queue/*/*.json
+workspace/runs/*
+workspace/state/*.db*
+!workspace/**/.gitkeep

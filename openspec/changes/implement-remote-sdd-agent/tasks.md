@@ -4,46 +4,46 @@ Tasks are grouped by the 8 phases from `spec.md §8` (M1–M8). Each phase ends 
 
 ## 1. M1 — Skeleton
 
-- [ ] 1.1 Create top-level directory layout: `receiver/src`, `receiver/test`, `worker/src`, `worker/test`, `pipeline/prompts`, `shared/src`, `workspace/queue/{pending,processing,done,failed}`, `workspace/runs`, `workspace/state`
-- [ ] 1.2 Add `.gitkeep` files to keep empty `workspace/queue/*` directories tracked
-- [ ] 1.3 Write root `.env.example` listing every variable from `agent-configuration/spec.md` with inline purpose comments and defaults
-- [ ] 1.4 Update root `.gitignore` to exclude `.env`, `workspace/queue/*/*.json`, `workspace/runs/*`, `workspace/state/*.db*`, and `node_modules`
-- [ ] 1.5 Write `receiver/Dockerfile` based on `node:20-alpine`, copying `package.json` first for layer caching, exposing the HTTP port, running as a non-root user
-- [ ] 1.6 Write `worker/Dockerfile` based on `node:20-bullseye` (needs `git` + `gh` CLI), installing `git`, `gh`, and the `claude` CLI; pin versions
-- [ ] 1.7 Write `docker-compose.yml` with two services (`receiver`, `worker`), a shared named volume `workspace` mounted at `/workspace`, `env_file: .env`, `receiver` publishing port 3000:3000, worker `depends_on: receiver`
-- [ ] 1.8 Add `shared/` mini-package with TypeScript type definitions for `TaskTrigger`, `Context`, and `RunMetadata` from `spec.md §5`; consumed by both services via relative import or workspace
-- [ ] 1.9 Initialize root `package.json` as a workspaces root referencing `receiver`, `worker`, `shared`
-- [ ] 1.10 Expand `README.md` with the 5-step setup path required by `agent-configuration/spec.md`
-- [ ] 1.11 **Acceptance**: `docker compose up` brings both containers up; `curl localhost:3000/health` returns 200 with `{ "status": "ok" }` (health endpoint stubbed for now)
+- [x] 1.1 Create top-level directory layout: `receiver/src`, `receiver/test`, `worker/src`, `worker/test`, `pipeline/prompts`, `shared/src`, `workspace/queue/{pending,processing,done,failed}`, `workspace/runs`, `workspace/state`
+- [x] 1.2 Add `.gitkeep` files to keep empty `workspace/queue/*` directories tracked
+- [x] 1.3 Write root `.env.example` listing every variable from `agent-configuration/spec.md` with inline purpose comments and defaults
+- [x] 1.4 Update root `.gitignore` to exclude `.env`, `workspace/queue/*/*.json`, `workspace/runs/*`, `workspace/state/*.db*`, and `node_modules`
+- [x] 1.5 Write `receiver/Dockerfile` based on `node:20-alpine`, copying `package.json` first for layer caching, exposing the HTTP port, running as a non-root user
+- [x] 1.6 Write `worker/Dockerfile` based on `node:20-bullseye` (needs `git` + `gh` CLI), installing `git`, `gh`, and the `claude` CLI; pin versions
+- [x] 1.7 Write `docker-compose.yml` with two services (`receiver`, `worker`), a shared named volume `workspace` mounted at `/workspace`, `env_file: .env`, `receiver` publishing port 3000:3000, worker `depends_on: receiver`
+- [x] 1.8 Add `shared/` mini-package with TypeScript type definitions for `TaskTrigger`, `Context`, and `RunMetadata` from `spec.md §5`; consumed by both services via relative import or workspace
+- [x] 1.9 Initialize root `package.json` as a workspaces root referencing `receiver`, `worker`, `shared`
+- [x] 1.10 Expand `README.md` with the 5-step setup path required by `agent-configuration/spec.md`
+- [x] 1.11 **Acceptance**: `docker compose up` brings both containers up; `curl localhost:3000/health` returns 200 with `{ "status": "ok" }` (health endpoint stubbed for now)
 
 ## 2. M2 — Receiver
 
-- [ ] 2.1 Initialize `receiver/package.json` with deps: `express`, `tsx`, `typescript`, `@types/express`, `@types/node`
-- [ ] 2.2 Set up `receiver/tsconfig.json` targeting Node 20, strict mode
-- [ ] 2.3 Implement `receiver/src/config.ts`: load and validate env vars per `agent-configuration/spec.md`; fail fast with a clear message on missing required vars
-- [ ] 2.4 Implement `receiver/src/server.ts` Express app: apply `express.json({ verify: (req,_res,buf) => req.rawBody = buf })` middleware
-- [ ] 2.5 Implement `GET /health` returning `200 { "status": "ok" }`
-- [ ] 2.6 Implement `receiver/src/verifySignature.ts`: compute `sha256=<hex>` HMAC over `req.rawBody`, compare with `crypto.timingSafeEqual` against equal-length buffers; reject 401 if absent or mismatched
-- [ ] 2.7 Implement `receiver/src/filters/botFilter.ts`: returns true if `payload.sender.login` ends with `[bot]`
-- [ ] 2.8 Implement `receiver/src/filters/repoFilter.ts`: parses `ALLOWED_REPOS` CSV once at boot, returns true if `payload.repository.full_name` is in the set
-- [ ] 2.9 Implement `receiver/src/triggerMap.ts`: pure functions `labelTrigger`, `statusTrigger`, `mentionTrigger`, each returning `TaskTrigger | null` from a payload + headers
-- [ ] 2.10 Implement `receiver/src/enqueue.ts`: write `.<triggerId>.json.tmp` to `pending/`, then atomic `rename()`; return triggerId
-- [ ] 2.11 Wire `/webhook` route: verify → bot filter → repo filter → map to trigger → enqueue → respond per the response-code matrix (202/204/401/500); ensure ack <100ms
-- [ ] 2.12 Add unit tests for `verifySignature` (good/bad/missing/timing-safe), `botFilter`, `repoFilter`, and each `triggerMap` function
-- [ ] 2.13 Add an integration test using `supertest` that posts a signed `issues.labeled` payload and asserts a file appears in `pending/`
-- [ ] 2.14 **Acceptance**: a signed `issues.labeled` payload for a whitelisted repo with `label.name = $TRIGGER_LABEL` produces `workspace/queue/pending/<triggerId>.json`; an unsigned payload returns 401; a `[bot]` sender returns 204; a non-whitelisted repo returns 204
+- [x] 2.1 Initialize `receiver/package.json` with deps: `express`, `tsx`, `typescript`, `@types/express`, `@types/node`
+- [x] 2.2 Set up `receiver/tsconfig.json` targeting Node 20, strict mode
+- [x] 2.3 Implement `receiver/src/config.ts`: load and validate env vars per `agent-configuration/spec.md`; fail fast with a clear message on missing required vars
+- [x] 2.4 Implement `receiver/src/server.ts` Express app: apply `express.json({ verify: (req,_res,buf) => req.rawBody = buf })` middleware
+- [x] 2.5 Implement `GET /health` returning `200 { "status": "ok" }`
+- [x] 2.6 Implement `receiver/src/verifySignature.ts`: compute `sha256=<hex>` HMAC over `req.rawBody`, compare with `crypto.timingSafeEqual` against equal-length buffers; reject 401 if absent or mismatched
+- [x] 2.7 Implement `receiver/src/filters/botFilter.ts`: returns true if `payload.sender.login` ends with `[bot]`
+- [x] 2.8 Implement `receiver/src/filters/repoFilter.ts`: parses `ALLOWED_REPOS` CSV once at boot, returns true if `payload.repository.full_name` is in the set
+- [x] 2.9 Implement `receiver/src/triggerMap.ts`: pure functions `labelTrigger`, `statusTrigger`, `mentionTrigger`, each returning `TaskTrigger | null` from a payload + headers
+- [x] 2.10 Implement `receiver/src/enqueue.ts`: write `.<triggerId>.json.tmp` to `pending/`, then atomic `rename()`; return triggerId
+- [x] 2.11 Wire `/webhook` route: verify → bot filter → repo filter → map to trigger → enqueue → respond per the response-code matrix (202/204/401/500); ensure ack <100ms
+- [x] 2.12 Add unit tests for `verifySignature` (good/bad/missing/timing-safe), `botFilter`, `repoFilter`, and each `triggerMap` function
+- [x] 2.13 Add an integration test using `supertest` that posts a signed `issues.labeled` payload and asserts a file appears in `pending/`
+- [x] 2.14 **Acceptance**: a signed `issues.labeled` payload for a whitelisted repo with `label.name = $TRIGGER_LABEL` produces `workspace/queue/pending/<triggerId>.json`; an unsigned payload returns 401; a `[bot]` sender returns 204; a non-whitelisted repo returns 204
 
 ## 3. M3 — Worker stub
 
-- [ ] 3.1 Initialize `worker/package.json` with deps: `typescript`, `tsx`, `@types/node`
-- [ ] 3.2 Set up `worker/tsconfig.json` matching the receiver
-- [ ] 3.3 Implement `worker/src/config.ts`: same env-var validation pattern as receiver
-- [ ] 3.4 Implement `worker/src/queue.ts`: `claimNext()` that scans `pending/` for non-hidden `*.json`, calls atomic `rename()` to `processing/`, returns `{ triggerId, payload }` or null on empty/ENOENT
-- [ ] 3.5 Implement `worker/src/queue.ts` helpers `moveToDone(triggerId)` and `moveToFailed(triggerId)` using `rename()`
-- [ ] 3.6 Implement `worker/src/main.ts` poll loop: claim → log → sleep 1s on empty → move to `done/` immediately (stub behavior)
-- [ ] 3.7 Add a graceful-shutdown handler on SIGTERM that finishes the current iteration before exiting
-- [ ] 3.8 Add unit tests for queue operations including ENOENT race scenario (two concurrent `claimNext()` calls)
-- [ ] 3.9 **Acceptance**: trigger a payload via M2's receiver; observe the file move `pending → processing → done` within 2 seconds in worker logs
+- [x] 3.1 Initialize `worker/package.json` with deps: `typescript`, `tsx`, `@types/node`
+- [x] 3.2 Set up `worker/tsconfig.json` matching the receiver
+- [x] 3.3 Implement `worker/src/config.ts`: same env-var validation pattern as receiver
+- [x] 3.4 Implement `worker/src/queue.ts`: `claimNext()` that scans `pending/` for non-hidden `*.json`, calls atomic `rename()` to `processing/`, returns `{ triggerId, payload }` or null on empty/ENOENT
+- [x] 3.5 Implement `worker/src/queue.ts` helpers `moveToDone(triggerId)` and `moveToFailed(triggerId)` using `rename()`
+- [x] 3.6 Implement `worker/src/main.ts` poll loop: claim → log → sleep 1s on empty → move to `done/` immediately (stub behavior)
+- [x] 3.7 Add a graceful-shutdown handler on SIGTERM that finishes the current iteration before exiting
+- [x] 3.8 Add unit tests for queue operations including ENOENT race scenario (two concurrent `claimNext()` calls)
+- [x] 3.9 **Acceptance**: trigger a payload via M2's receiver; observe the file move `pending → processing → done` within 2 seconds in worker logs
 
 ## 4. M4 — Worker + naive Claude call
 

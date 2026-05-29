@@ -1,113 +1,96 @@
-# remote-agent
+# remote-sdd-agent
 
 A self-hosted remote coding agent: GitHub Issue → SDD pipeline → Pull Request.
-Inspired by Wix's "Nota" architecture.
+Code never leaves your machine — the agent only talks to GitHub + Anthropic.
 
-## Day 1 status
+The architecture, contracts, and security model are documented in
+[`spec.md`](./spec.md). Active implementation work lives under
+[`openspec/changes/implement-remote-sdd-agent/`](./openspec/changes/implement-remote-sdd-agent/).
 
-This is the foundation: webhook receiver + worker skeleton + queue. No Claude
-calls happen yet — the worker just logs claimed tasks. Day 2 wires in the
-SDD pipeline.
+## Status
 
-## Setup
+Day 1: webhook receiver + worker skeleton + file queue. The worker claims
+tasks but does not yet run the SDD pipeline. Subsequent milestones (M4–M8)
+wire in cloning, Claude calls, the staged pipeline, and the cost kill-switch.
 
-### 1. Copy env
+## Setup — 5 steps from a clean clone
+
+### 1. Create a GitHub App (or a fine-grained PAT)
+
+Go to <https://github.com/settings/apps/new>. Required permissions on the
+repos the agent will work on:
+
+- **Contents**: Read & write
+- **Issues**: Read & write
+- **Pull requests**: Read & write
+- **Metadata**: Read (auto)
+
+Subscribe to: **Issues**, **Issue comment**. Install on your target repo(s).
+A fine-grained PAT with the same scopes also works for purely local testing.
+
+### 2. Copy `.env.example` to `.env` and fill required values
 
 ```bash
 cp .env.example .env
-# Fill in GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN, ANTHROPIC_API_KEY, ALLOWED_REPOS
+# Required:
+#   GITHUB_WEBHOOK_SECRET   (openssl rand -hex 32)
+#   GITHUB_TOKEN            (App installation token or PAT)
+#   ANTHROPIC_API_KEY       (only used by the worker pipeline)
+#   ALLOWED_REPOS           (comma-separated owner/name)
 ```
 
-Generate a secret:
+Every variable is documented inline in `.env.example`.
+
+### 3. Start a public tunnel and point the GitHub App webhook at it
+
 ```bash
-openssl rand -hex 32
+# Pick one:
+ngrok http 3000
+cloudflared tunnel --url http://localhost:3000
 ```
 
-### 2. Build & run
+In the GitHub App settings:
+
+- **Webhook URL**: `https://<your-tunnel>/webhook`
+- **Webhook secret**: same value as `GITHUB_WEBHOOK_SECRET` in `.env`
+
+### 4. Start the containers
 
 ```bash
 docker compose up --build
 ```
 
-You should see:
-```
-remote-agent-receiver  | Receiver listening on :3000
-remote-agent-worker    | [worker] polling /queue/pending every 5000ms
-```
+You should see the receiver listening on `:3000` and the worker polling
+`/workspace/queue/pending`.
 
-### 3. Expose locally (pick one)
+### 5. Verify end-to-end
 
-**ngrok:**
-```bash
-ngrok http 3000
-```
-
-**Cloudflare Tunnel (no signup, recommended):**
-```bash
-cloudflared tunnel --url http://localhost:3000
-```
-
-Copy the public URL — you'll paste it into your GitHub App next.
-
-### 4. Create a GitHub App
-
-Go to: <https://github.com/settings/apps/new>
-
-- **Webhook URL**: `https://<your-tunnel>/webhook`
-- **Webhook secret**: same value as `GITHUB_WEBHOOK_SECRET` in `.env`
-- **Permissions** (Repository):
-  - Contents: Read & write
-  - Issues: Read & write
-  - Pull requests: Read & write
-  - Metadata: Read (auto)
-- **Subscribe to events**: Issues, Issue comment
-- Install the app on your target repo(s)
-
-### 5. Smoke test
-
-In your test repo, add the `agent:run` label to any issue. Watch the worker
-logs — you should see:
+Add the `agent:run` label (or whatever `TRIGGER_LABEL` is set to) to any
+issue on a whitelisted repo, **or** post a comment containing
+`@<BOT_MENTION>`. Watch the worker logs:
 
 ```
-[worker] claimed remote-agent-test-42-1716...json
-[worker] would run pipeline for you/your-repo issue #42 (source=label)
+[worker] claimed acme__widgets__42__1717000000000.json
 ```
 
-If the receiver logs `Rejected webhook: invalid signature` — your secrets
-don't match. If you see `Ignored issues` — the label name didn't match
-`TRIGGER_LABEL`.
+For a no-GitHub smoke test, run `bash scripts/smoke-test.sh` — it signs
+local payloads with your webhook secret and exercises the four response
+codes (202/204/401 + queue file appearance).
 
-## Local test without GitHub
-
-You can hit the receiver directly with a properly signed payload:
-
-```bash
-SECRET="$(grep GITHUB_WEBHOOK_SECRET .env | cut -d= -f2)"
-BODY='{"action":"labeled","repository":{"name":"test","owner":{"login":"me"},"full_name":"me/test"},"issue":{"number":1,"title":"x","body":"y","html_url":"https://x","user":{"login":"me"}},"label":{"name":"agent:run"},"sender":{"login":"me"}}'
-SIG="sha256=$(echo -n "$BODY" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $2}')"
-
-curl -X POST http://localhost:3000/webhook \
-  -H "Content-Type: application/json" \
-  -H "X-GitHub-Event: issues" \
-  -H "X-GitHub-Delivery: test-1" \
-  -H "X-Hub-Signature-256: $SIG" \
-  -d "$BODY"
-```
-
-Add `me/test` to `ALLOWED_REPOS` in `.env` for this to pass the safety net.
-
-## Architecture
+## Architecture (one paragraph)
 
 ```
-GitHub  ──webhook──►  receiver  ──file──►  /queue/pending  ──poll──►  worker
-                                                                        │
-                                                                        ▼
-                                                                  (Day 2: pipeline)
+GitHub  ──webhook──►  receiver  ──file──►  workspace/queue/pending  ──poll──►  worker
+                                                                                  │
+                                                                                  ▼
+                                                                       pipeline.sh (M5+)
 ```
 
-Two containers, one shared volume. Receiver responds <100ms; worker does
-the long-running stuff independently. File-per-task queue uses POSIX
-`rename()` for atomic claim — no locks, scales to multiple workers later.
+Two containers, one shared `/workspace` volume. Receiver ACKs in <100ms;
+worker does long-running work independently. File-per-task queue uses
+POSIX `rename()` for atomic claim — no locks, scales to multiple workers
+later. See [`spec.md`](./spec.md) for the full architecture, security
+model, and milestone breakdown.
 
 ## Project layout
 
@@ -115,10 +98,23 @@ the long-running stuff independently. File-per-task queue uses POSIX
 .
 ├── docker-compose.yml
 ├── .env.example
-├── receiver/        # Express + HMAC verify + normalize + enqueue
-├── worker/          # Poll loop, claim, (TODO) run pipeline
-├── pipeline/        # bash + prompts (Day 2)
+├── receiver/        Express + HMAC verify + filters + enqueue
+├── worker/          Poll loop, claim, (M4+) clone + run pipeline
+├── shared/          Shared TypeScript types (TaskTrigger, Context, RunMetadata)
+├── pipeline/        bash + prompts (M5+)
+├── scripts/         smoke-test.sh
+├── openspec/        Active change proposals and per-capability specs
 └── workspace/
-    ├── queue/       # pending / processing / done / failed
-    └── runs/        # per-task working directories
+    ├── queue/       pending / processing / done / failed
+    ├── runs/        Per-task working directories
+    └── state/       Receiver dedupe DB (M7+)
 ```
+
+## Recovering a failed run
+
+A failed task lands in `workspace/queue/failed/<triggerId>.json` and its
+run directory `workspace/runs/<triggerId>/` is preserved for postmortem.
+To retry, move the file back to `workspace/queue/pending/`. The cost
+kill-switch (`MAX_COST_USD`, default $5/run) trips between pipeline
+stages — runs aborted that way land in `failed/` with `run.json.status =
+"aborted-cost"`.
