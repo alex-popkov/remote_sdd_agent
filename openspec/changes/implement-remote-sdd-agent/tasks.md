@@ -47,15 +47,15 @@ Tasks are grouped by the 8 phases from `spec.md §8` (M1–M8). Each phase ends 
 
 ## 4. M4 — Worker + naive Claude call
 
-- [ ] 4.1 Add to `worker/Dockerfile`: ensure `git`, `gh`, and the `claude` CLI are installed and on PATH; pin versions
-- [ ] 4.2 Implement `worker/src/runWorkspace.ts`: create `workspace/runs/<triggerId>/{repo,artifacts,logs}` and write initial `run.json` with `status: "running"`, `startedAt`, empty `stages`
-- [ ] 4.3 Implement `worker/src/gitOps.ts#cloneRepo(trigger, dest)`: build `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<name>` URL, run `git clone`, never log the token
-- [ ] 4.4 Implement `worker/src/gitOps.ts#createBranch(repoDir, trigger)`: branch name `agent/<issue-number>-<slug>-<shortTriggerId>`, slug = kebab(title) truncated to 40 chars
-- [ ] 4.5 Implement `worker/src/claudeCall.ts#naive(trigger, repoDir)`: invoke `claude -p "Fix issue #<N>: <title>\n\n<body>"` with `cwd = repoDir`, tee output to `$LOGS_DIR/naive.log`
-- [ ] 4.6 Implement `worker/src/prCreate.ts#createPr(repoDir, trigger, body)`: `git add -A && git commit -m "agent: <title> (closes #N)" && git push -u origin <branch> && gh pr create --title ... --body ... --label agent:created`; capture and return the PR URL
-- [ ] 4.7 Implement `worker/src/notify.ts#commentOnIssue(trigger, body)`: shell out to `gh issue comment <N> --repo <owner>/<name> --body "..."`
-- [ ] 4.8 Replace the M3 stub poll-loop body with: prepare workspace → clone → checkout branch → naive Claude call → if diff non-empty: create PR + comment back → move to `done/` or `failed/`
-- [ ] 4.9 Add an "empty diff" guard that fails the run with `failureReason: "empty-diff"` and skips PR creation
+- [x] 4.1 Add to `worker/Dockerfile`: ensure `git`, `gh`, and the `claude` CLI are installed and on PATH; pin versions
+- [x] 4.2 Implement `worker/src/runWorkspace.ts`: create `workspace/runs/<triggerId>/{repo,artifacts,logs}` and write initial `run.json` with `status: "running"`, `startedAt`, empty `stages`
+- [x] 4.3 Implement `worker/src/gitOps.ts#cloneRepo(trigger, dest)`: build `https://x-access-token:${GITHUB_TOKEN}@github.com/<owner>/<name>` URL, run `git clone`, never log the token
+- [x] 4.4 Implement `worker/src/gitOps.ts#createBranch(repoDir, trigger)`: branch name `agent/<issue-number>-<slug>-<shortTriggerId>`, slug = kebab(title) truncated to 40 chars
+- [x] 4.5 Implement `worker/src/claudeCall.ts#naive(trigger, repoDir)`: invoke `claude -p "Fix issue #<N>: <title>\n\n<body>"` with `cwd = repoDir`, tee output to `$LOGS_DIR/naive.log`
+- [x] 4.6 Implement `worker/src/prCreate.ts#createPr(repoDir, trigger, body)`: `git add -A && git commit -m "agent: <title> (closes #N)" && git push -u origin <branch> && gh pr create --title ... --body ... --label agent:created`; capture and return the PR URL
+- [x] 4.7 Implement `worker/src/notify.ts#commentOnIssue(trigger, body)`: shell out to `gh issue comment <N> --repo <owner>/<name> --body "..."`
+- [x] 4.8 Replace the M3 stub poll-loop body with: prepare workspace → clone → checkout branch → naive Claude call → if diff non-empty: create PR + comment back → move to `done/` or `failed/`
+- [x] 4.9 Add an "empty diff" guard that fails the run with `failureReason: "empty-diff"` and skips PR creation
 - [ ] 4.10 **Acceptance**: label a real issue on a test repo with `$TRIGGER_LABEL`; within ~5 minutes a PR is opened against that issue and the issue receives a comment with the PR URL
 
 ## 5. M5 — SDD pipeline: minimum viable stages

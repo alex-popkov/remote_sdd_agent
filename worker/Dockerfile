@@ -1,22 +1,31 @@
 # Build context is the repo root (configured in docker-compose).
+# git is pinned implicitly by the base-image tag (node:20-bookworm-slim ships
+# Debian bookworm's git). Bump the tag to move git.
 FROM node:20-bookworm-slim
 
-# Install git, gh CLI, and curl. gh's apt repo needs gnupg + a keyring setup.
+# Pinned tool versions. Bump deliberately in a dedicated PR (design.md risk:
+# "gh and git CLI version drift" / "Claude CLI behavior changes").
+ARG GH_VERSION=2.93.0
+ARG CLAUDE_CODE_VERSION=2.1.158
+
+# Install git + curl from apt, then gh from a pinned upstream .deb so the
+# version is locked rather than tracking the rolling apt repo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
-    gnupg \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-       | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-       > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && arch="$(dpkg --print-architecture)" \
+    && curl -fsSL -o /tmp/gh.deb \
+       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.deb" \
+    && dpkg -i /tmp/gh.deb \
+    && rm /tmp/gh.deb \
+    && git --version && gh --version
 
-# Install the claude CLI globally — used by the worker pipeline (M5+).
-RUN npm install -g @anthropic-ai/claude-code
+# Install the claude CLI globally (pinned) — used by the naive call (M4) and
+# the SDD pipeline (M5+).
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && claude --version
 
 WORKDIR /app
 
