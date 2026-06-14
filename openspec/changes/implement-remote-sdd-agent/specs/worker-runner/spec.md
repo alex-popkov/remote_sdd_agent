@@ -58,23 +58,29 @@ The worker SHALL invoke `bash /pipeline/pipeline.sh` with `RUN_DIR` pointing at 
 
 ### Requirement: Open a Pull Request on success
 
-On successful pipeline completion, the worker SHALL push the agent branch to the remote and run `gh pr create` with:
+On pipeline completion, the worker SHALL push the agent branch to the remote and run `gh pr create` with:
 
 - title: derived from the issue title (e.g., `"<issue title> (closes #<N>)"`)
-- body: composed from `artifacts/spec.md`, `artifacts/design.md`, `artifacts/tasks.md`, and `artifacts/verdict.txt`, each under a clearly-labeled section
+- body: composed from the agent artifacts under `.claude/sdd-tracking/` (via `$ARTIFACTS_DIR`) — the plan (`plans/*-plan.instructions.md`), the changes summary (`changes/*-changes.md`), and the verification report (`verification/*-verification.md`) — plus the committed permanent spec under `.claude/specs/` when present, each under a clearly-labeled section; the verification report and any plan-challenge review notes MAY be placed in a collapsed `<details>` block
 - labels: `agent:created`
 - base: the repo's default branch
+- draft: the PR SHALL be opened as a **draft** when the final verdict is `FAIL`, with the verifier's blocking findings included in the body
 
 The resulting PR URL SHALL be written into `run.json.prUrl`.
 
 #### Scenario: PR is opened and recorded
 
-- **WHEN** the pipeline succeeds and the branch contains a non-empty diff
+- **WHEN** the pipeline completes and the branch contains a non-empty diff
 - **THEN** a PR is opened, its URL is captured, and `run.json.prUrl` is populated
+
+#### Scenario: Failing verdict opens a draft PR
+
+- **WHEN** the final verdict from `task-verifier` is `FAIL`
+- **THEN** the PR is opened as a draft and its body includes the verifier's blocking findings
 
 #### Scenario: Empty diff aborts PR creation
 
-- **WHEN** the pipeline succeeds but no files were changed in `repo/`
+- **WHEN** the pipeline finishes but no files were changed in `repo/`
 - **THEN** the worker treats the run as failed with `failureReason: "empty-diff"` and does not invoke `gh pr create`
 
 ### Requirement: Notify the source issue

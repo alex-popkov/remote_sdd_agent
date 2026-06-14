@@ -25,7 +25,7 @@ For each stage, the pipeline SHALL record `inputTokens`, `outputTokens`, and `co
 
 #### Scenario: Cost is computed from real token counts
 
-- **WHEN** stage `02-spec` consumes 1000 input tokens and produces 500 output tokens on a model with rates $3/Mtok in and $15/Mtok out
+- **WHEN** stage `task-planner` consumes 1000 input tokens and produces 500 output tokens on a model with rates $3/Mtok in and $15/Mtok out
 - **THEN** `run.json.stages[i].costUsd ≈ 0.003 + 0.0075 = 0.0105`
 
 ### Requirement: Cost kill-switch between stages
@@ -62,12 +62,12 @@ The pipeline SHALL record `durationMs` for each stage as the wall-clock time bet
 
 ### Requirement: Failure reason capture
 
-When a run terminates with `status: "failed"` or `status: "aborted-cost"`, `run.json.failureReason` SHALL be populated with a short human-readable string identifying the cause (e.g., `"stage 04-design exhausted 3 retries"`, `"cost ceiling exceeded: $5.10 > $5.00"`, `"empty diff"`).
+When a run terminates with `status: "failed"` or `status: "aborted-cost"`, `run.json.failureReason` SHALL be populated with a short human-readable string identifying the cause (e.g., `"stage task-executor exhausted 3 retries"`, `"cost ceiling exceeded: $5.10 > $5.00"`, `"empty diff"`).
 
 #### Scenario: Hard failure records reason
 
-- **WHEN** stage `04-design` exhausts its retries
-- **THEN** `run.json.failureReason` contains `"04-design"` and `"retries"`
+- **WHEN** stage `task-executor` exhausts its retries
+- **THEN** `run.json.failureReason` contains `"task-executor"` and `"retries"`
 
 #### Scenario: Cost abort records reason
 

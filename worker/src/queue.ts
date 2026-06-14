@@ -57,7 +57,8 @@ export function claimNext(workspaceDir: string): Claim | null {
   // Spec: scan only non-hidden *.json files. Hidden .<id>.json.tmp files
   // are mid-write enqueues we must ignore. Sort so claim order is
   // deterministic across workers.
-  const candidates = entries.filter(f => !f.startsWith('.') && f.endsWith('.json')).sort();
+  const candidates =
+      entries.filter(f => !f.startsWith('.') && f.endsWith('.json')).sort();
 
   for (const filename of candidates) {
     const from = path.join(pending, filename);

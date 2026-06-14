@@ -8,6 +8,9 @@ export interface WorkerConfig {
   botMention: string;
   maxCostUsd: number;
   maxStageRetries: number;
+  maxVerifyRetries: number;
+  enablePlanChallenge: boolean;
+  pipelineScript: string;
   workspaceDir: string;
   pollIntervalMs: number;
 }
@@ -17,8 +20,11 @@ const DEFAULTS = {
   botMention: 'remote-agent',
   maxCostUsd: 5.0,
   maxStageRetries: 3,
+  maxVerifyRetries: 1,
+  enablePlanChallenge: true,
+  pipelineScript: '/pipeline/pipeline.sh',
   workspaceDir: '/workspace',
-  pollIntervalMs: 1000,
+  pollIntervalMs: 5000,
 } as const;
 
 function required(name: string, value: string | undefined): string {
@@ -51,6 +57,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
     botMention: env.BOT_MENTION ?? DEFAULTS.botMention,
     maxCostUsd: numberOrExit('MAX_COST_USD', env.MAX_COST_USD, DEFAULTS.maxCostUsd),
     maxStageRetries: numberOrExit('MAX_STAGE_RETRIES', env.MAX_STAGE_RETRIES, DEFAULTS.maxStageRetries),
+    maxVerifyRetries: numberOrExit('MAX_VERIFY_RETRIES', env.MAX_VERIFY_RETRIES, DEFAULTS.maxVerifyRetries),
+    enablePlanChallenge: (env.ENABLE_PLAN_CHALLENGE ?? String(DEFAULTS.enablePlanChallenge)) !== 'false',
+    pipelineScript: env.PIPELINE_SCRIPT ?? DEFAULTS.pipelineScript,
     workspaceDir: env.WORKSPACE_DIR ?? DEFAULTS.workspaceDir,
     pollIntervalMs: numberOrExit('POLL_INTERVAL_MS', env.POLL_INTERVAL_MS, DEFAULTS.pollIntervalMs),
   };

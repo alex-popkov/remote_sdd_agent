@@ -21,9 +21,10 @@ infrastructure.
 
 The agent uses a **Spec-Driven Development (SDD) pipeline**: instead of one
 large prompt asking Claude to "fix the issue," the work is split into a
-sequence of small, isolated stages (parse → spec → design → tasks →
-implement → verify). Each stage runs in a fresh Claude session and produces
-a concrete artifact on disk. The next stage reads that artifact as input.
+sequence of small, isolated stages, each driven by a focused, stack-agnostic
+subagent (research → plan → challenge-plan → implement → verify → specify).
+Each stage runs in a fresh Claude session and writes concrete artifacts on
+disk; the next stage reads those artifacts as input.
 
 **Inspired by:** Wix's internal "Nota" agent, presented as a reference
 architecture for in-VPC coding agents.
@@ -38,9 +39,9 @@ architecture for in-VPC coding agents.
   label change, or `@bot` mention in a comment.
 - **G2.** Verify every incoming webhook is genuinely from GitHub (HMAC).
 - **G3.** Run a multi-stage SDD pipeline where each stage is an isolated
-  Claude session with a single, well-defined output artifact.
-- **G4.** Open a Pull Request with the implementation, spec, design, and
-  task list attached to its description.
+  Claude session driving a focused subagent with a well-defined output artifact.
+- **G4.** Open a Pull Request with the implementation, the plan, the
+  verification report, and the permanent spec attached to its description.
 - **G5.** Notify back to the original Issue (and Slack thread, later) with
   a link to the PR.
 - **G6.** Log cost, token usage, and duration per run.
@@ -188,8 +189,10 @@ results.
 1. **Claim** — `rename('/queue/pending/X.json', '/queue/processing/X.json')`.
    If rename fails with ENOENT, another worker got it (future-proofing).
 2. **Prepare workspace** — create `/runs/<triggerId>/` with subdirs:
-    - `repo/` — fresh git clone
-    - `artifacts/` — stage outputs (`context.json`, `spec.md`, etc.)
+    - `repo/` — fresh git clone (the agents' `.claude/sdd-tracking/` working
+      tree and committed `.claude/specs/` live inside it)
+    - `artifacts/` — the agents' `.claude/sdd-tracking/` tree, symlinked here
+      so artifacts persist outside the repo for the worker and observability
     - `logs/` — per-stage stdout + stderr
     - `run.json` — metadata (start, end, cost, tokens, stage results)
 3. **Clone** — use a token authenticated as the GitHub App:
@@ -198,8 +201,9 @@ results.
 4. **Run pipeline** — `bash /pipeline/pipeline.sh` with env vars pointing
    at the run dir. The pipeline is the contract; the worker just invokes it.
 5. **Open PR** — `gh pr create` with title, body templated from artifacts,
-   labels `agent:created`. Attach `spec.md`, `design.md`, `tasks.md` as
-   sections in the PR body.
+   labels `agent:created`. Attach the plan, changes summary, verification
+   report, and committed spec as sections in the PR body; open the PR as a
+   **draft** when the final verdict is `FAIL`.
 6. **Notify** — `gh issue comment <N> --body "PR opened: <url>"`.
 7. **Cleanup** — move `processing/X.json` to `done/X.json` (success) or
    `failed/X.json` (failure). Run dir is kept for postmortem.
@@ -219,37 +223,49 @@ explicit stages.
 
 **Invariants:**
 
-- Each stage runs `claude -p "$(cat prompts/<stage>.md)" --output-file artifacts/<stage>.out`
-  with the run directory as CWD.
+- Each stage runs `claude -p "<task instruction>" --agent <agent-name>`
+  with the run's `repo/` directory as CWD. Each stage drives one of the
+  subagents defined in `/pipeline/agents/`.
 - Each stage has **exactly one** primary output artifact. If a stage needs
-  to produce multiple files, it writes them itself but reports a single
-  "result" file.
+  to produce multiple files, it writes them itself but the pipeline only
+  requires the primary file to exist for the stage to count as successful.
 - Each stage starts a **fresh Claude session.** No state leaks between
-  stages except through artifacts on disk.
-- Prompts are markdown files in `/pipeline/prompts/`. They reference prior
-  artifacts by relative path. **Prompts are data, not code.**
+  stages except through files the agents read and write under
+  `repo/.claude/sdd-tracking/` (and the committed `repo/.claude/specs/`).
+- Agents are **stack-agnostic** markdown files in `/pipeline/agents/`
+  (frontmatter: `name`, `description`, `tools`, `model`). They discover the
+  target repo's language, frameworks, and conventions from the repo itself
+  and from its `CLAUDE.md` / project skills when present. **Agents are data,
+  not code.**
 
 **Stages (v1):**
 
-| # | Stage | Reads | Writes | Purpose |
+| # | Stage | Agent | Primary artifact | Purpose |
 |---|---|---|---|---|
-| 01 | `parse` | issue payload (env) | `context.json` | Pull out title/body/AC/links; structure unstructured text |
-| 02 | `spec` | `context.json` | `spec.md` | Write a precise, testable specification |
-| 03 | `challenge-spec` | `spec.md` | `spec-review.md` + revised `spec.md` | Adversarial review — find gaps, contradictions, missing AC |
-| 04 | `design` | `spec.md`, repo tree | `design.md` | Identify files to touch, propose changes, sketch interfaces |
-| 05 | `challenge-design` | `design.md` | `design-review.md` + revised `design.md` | Critique design — alternatives, risks, simpler options |
-| 06 | `tasks` | `design.md` | `tasks.md` | Break into atomic, ordered work items |
-| 07 | `implement` | `tasks.md`, `design.md`, repo | git diff in repo | Actually write/edit code |
-| 08 | `verify` | diff, `spec.md` | `verdict.txt` (`PASS` / `FAIL: <reasons>`) | Independent check: does the diff satisfy the spec? |
-| 09 | `pr` | all artifacts | PR URL | Compose PR title + body, push branch, open PR |
+| 1 | `task-researcher` | task-researcher | `.../research/*-research.md` | Investigate the issue against the codebase; evidence-based research notes |
+| 2 | `task-planner` | task-planner | `.../plans/*-plan.instructions.md` (+ details, prompt) | Turn research into an ordered, actionable plan |
+| 3 | `plan-challenge` | task-planner (critique) | plan/details revised in place | Adversarial review — find gaps/risks in the plan, then revise it |
+| 4 | `task-executor` | task-executor | git diff + `.../changes/*-changes.md` | Write/edit code per the plan |
+| 5 | `task-verifier` | task-verifier | `.../verification/*-verification.md` (first line `VERDICT: PASS\|FAIL`) | Independent check vs. plan + acceptance criteria; run the repo's build/lint/tests |
+| 6 | `specification` | specification-from-artifacts | `.claude/specs/<module>/spec-*.md` | Distill artifacts into a committed permanent spec (PASS only) |
 
-**Stages 03 and 05 are "challenge" stages** — they exist specifically
-because one-shot generation tends to miss edge cases. The challenge
-stage's job is to be adversarial: find what's wrong, then revise.
+(Artifact paths shown relative to `repo/.claude/sdd-tracking/`. PR creation
+is handled by the worker, not a pipeline stage.)
+
+**The adversarial role is realized by agents in two places.** Pre-implementation,
+`plan-challenge` (a fresh `task-planner` session in critique mode) hunts for
+gaps and risks in the plan and revises it — the successor to the former
+`challenge-spec` / `challenge-design` prompt stages. Post-implementation,
+`task-verifier` independently checks the result. On a `FAIL` verdict the
+pipeline re-runs `task-executor` (fed the verification report) up to
+`MAX_VERIFY_RETRIES` times, routing planning-level failures back to
+`task-planner`. The `specification` stage runs only when the final verdict
+is `PASS`.
 
 **Pipeline driver (`pipeline.sh`)** is a plain bash loop. No orchestration
-framework. If a stage exits non-zero, retry up to 3 times; if still
-failing, exit the whole pipeline with that stage's code.
+framework. If a stage exits non-zero (or its primary artifact is missing),
+retry up to `MAX_STAGE_RETRIES` times; if still failing, exit the whole
+pipeline with that stage's code. Exit 0 on success, 42 on cost-abort.
 
 ### 4.4 Shared Volume Layout
 
@@ -262,19 +278,25 @@ workspace/
 │   └── failed/       # exceeded retries or hard error
 └── runs/
     └── <triggerId>/
-        ├── repo/             # git clone here
-        ├── artifacts/
-        │   ├── context.json
-        │   ├── spec.md
-        │   ├── spec-review.md
-        │   ├── design.md
-        │   ├── design-review.md
-        │   ├── tasks.md
-        │   └── verdict.txt
+        ├── repo/             # git clone; agents run with this as CWD
+        │   └── .claude/
+        │       ├── agents/   # the pipeline's agent definitions, copied in
+        │       ├── sdd-tracking/   # working artifacts (gitignored)
+        │       └── specs/    # permanent spec (committed, part of the PR)
+        ├── artifacts/        # symlink → repo/.claude/sdd-tracking/
+        │   ├── research/
+        │   ├── plans/
+        │   ├── details/
+        │   ├── prompts/
+        │   ├── changes/
+        │   └── verification/
         ├── logs/
-        │   ├── 01-parse.log
-        │   ├── 02-spec.log
-        │   └── ...
+        │   ├── task-researcher.log
+        │   ├── task-planner.log
+        │   ├── plan-challenge.log
+        │   ├── task-executor.log
+        │   ├── task-verifier.log
+        │   └── specification.log
         └── run.json          # cost, tokens, timings, final status
 ```
 
@@ -301,17 +323,24 @@ interface TaskTrigger {
 }
 ```
 
-### 5.2 `context.json` (output of `parse`)
+### 5.2 SDD artifacts & verdict contract
 
-```typescript
-interface Context {
-  summary: string;          // one-paragraph distilled description
-  acceptanceCriteria: string[];
-  constraints: string[];    // tech/perf/compat constraints found in body
-  links: Array<{ url: string; description: string }>;
-  unknowns: string[];       // questions the spec stage must resolve
-}
-```
+The agent pipeline does not use a single structured `context.json`. Instead,
+each agent reads and writes markdown artifacts under `repo/.claude/sdd-tracking/`,
+and one machine-readable contract governs the verify→PR handoff:
+
+| Producer | Location | Contract |
+|---|---|---|
+| `task-researcher` | `sdd-tracking/research/*-research.md` | Evidence-based research notes |
+| `task-planner` | `sdd-tracking/plans/`, `details/`, `prompts/` | Plan checklist, details, executor handoff prompt |
+| `task-executor` | `sdd-tracking/changes/*-changes.md` + git diff | What changed, plus the actual code |
+| `task-verifier` | `sdd-tracking/verification/*-verification.md` | **First line MUST be `VERDICT: PASS` or `VERDICT: FAIL`** |
+| `specification-from-artifacts` | `.claude/specs/<module>/spec-*.md` (committed) | Permanent, self-contained spec |
+
+The `VERDICT:` first line is the one contract the worker parses
+programmatically — it decides whether the PR is opened normally (`PASS`) or
+as a draft (`FAIL`). Everything else is human-readable markdown embedded in
+the PR body.
 
 ### 5.3 `run.json` (per-run metadata)
 
@@ -322,7 +351,7 @@ interface RunMetadata {
   endedAt?: string;
   status: 'running' | 'success' | 'failed' | 'aborted-cost';
   stages: Array<{
-    name: string;           // "01-parse", etc.
+    name: string;           // "task-researcher", "plan-challenge", etc.
     attempts: number;
     durationMs: number;
     inputTokens: number;
@@ -352,6 +381,8 @@ All config via env vars in `.env` (Docker reads it through `env_file`):
 | `BOT_MENTION` | no | `remote-agent` | Mention string (without `@`) |
 | `MAX_COST_USD` | no | `5.00` | Kill-switch ceiling per run |
 | `MAX_STAGE_RETRIES` | no | `3` | Per-stage retry budget |
+| `MAX_VERIFY_RETRIES` | no | `1` | Max executor→verifier re-runs on a `FAIL` verdict |
+| `ENABLE_PLAN_CHALLENGE` | no | `true` | Run the adversarial `plan-challenge` stage |
 
 ---
 
@@ -382,10 +413,11 @@ An attacker creates an issue with body:
   locally, so this is naturally limited; on a VM, use a restrictive
   outbound policy).
 - Each stage is a fresh Claude session — even if the issue body steers
-  the `parse` stage, downstream stages read structured `context.json`,
-  not raw user input.
-- The `verify` stage independently checks the diff against the spec — if
-  the diff modifies files unrelated to the issue, verify should fail.
+  the `task-researcher` stage, downstream stages work primarily from the
+  distilled research and plan artifacts, not raw user input.
+- The `task-verifier` stage independently checks the diff against the plan
+  and acceptance criteria — if the diff modifies files unrelated to the
+  issue, verification should fail.
 
 These are mitigations, not eliminations. Prompt injection is an open
 problem; assume it can happen and limit blast radius accordingly.
@@ -458,19 +490,23 @@ see it appear in `pending/`, then move to `done/`. End-to-end pipe works.
 PR back. End-to-end with actual code generation, no SDD yet. This is
 the "Simple Remote Agent" from the Wix slide deck.
 
-### M5. SDD Pipeline — minimum viable stages
-- `pipeline.sh` with stages: `01-parse`, `02-spec`, `07-implement`, `08-verify`
-- Prompts in `/pipeline/prompts/*.md`
-- Artifacts written to `/runs/<id>/artifacts/`
-- Per-stage retry up to 3 times
+### M5. SDD Pipeline — minimum viable agent stages
+- `pipeline.sh` with agent stages: `task-researcher`, `task-planner`,
+  `task-executor`, `task-verifier`
+- Agent definitions in `/pipeline/agents/*.md`, made discoverable to the CLI
+- Artifacts under `repo/.claude/sdd-tracking/`, symlinked to `/runs/<id>/artifacts/`
+- Per-stage retry up to 3 times; verify→execute loop on a `FAIL` verdict
 
-**M5 milestone test:** Same trigger as M4, but now PR description includes
-the spec, and the diff is noticeably more targeted.
+**M5 milestone test:** Same trigger as M4, but now the PR description
+includes the plan and the verdict, the PR is a draft on `FAIL`, and the
+diff is noticeably more targeted.
 
-### M6. SDD Pipeline — challenge stages
-- Add `03-challenge-spec`, `04-design`, `05-challenge-design`, `06-tasks`
-- Update `pipeline.sh` to run them in order
-- PR description includes all artifacts
+### M6. SDD Pipeline — challenge & specification
+- Add the adversarial `plan-challenge` stage (a fresh `task-planner`
+  critique pass, gated by `ENABLE_PLAN_CHALLENGE`)
+- Add the `specification` stage (`specification-from-artifacts`), run on a
+  `PASS` verdict, writing a committed permanent spec under `.claude/specs/`
+- PR description includes all agent artifacts plus the committed spec
 
 ### M7. Observability & safety
 - `run.json` written per run with timings and (estimated) cost
@@ -480,7 +516,7 @@ the spec, and the diff is noticeably more targeted.
 ### M8. Polish
 - Idle-task recovery (processing → pending if older than 1h)
 - Slack notification (deferred, optional)
-- Documentation of prompt-tuning workflow
+- Documentation of the agent-tuning workflow
 
 ---
 
@@ -494,11 +530,12 @@ real usage produces signal:
   PR; close the first.
 - **Multiple issues at once.** v1 worker processes serially. If the queue
   builds up, do we parallelize? Need to measure first.
-- **Spec versioning.** When the implementer revises `spec.md` in the
-  challenge stage, do we keep the original? v1: keep both as `spec.v1.md`
-  and `spec.md`.
-- **What "PASS" means in verify.** v1 is binary. Eventually we want
-  partial PASS (e.g., 4/5 AC met, opens PR as draft).
+- **Plan versioning.** When `plan-challenge` revises the plan in place, do
+  we keep the original? v1: revise in place (git history of the artifacts is
+  not preserved); snapshot the pre-challenge plan only if it proves useful.
+- **What "PASS" means in verify.** v1 verdict is binary (`PASS`/`FAIL`), and
+  a `FAIL` opens the PR as a draft. Eventually we want partial PASS (e.g.,
+  4/5 AC met) surfaced more granularly.
 - **MCP servers.** Wix uses MCPs to give the agent context (Jira, internal
   docs). v1 has none; v2 might add a code-search MCP.
 
@@ -508,8 +545,8 @@ real usage produces signal:
 
 - Wix's "Nota" architecture (the inspiration for this project). Key ideas
   adopted: VM remote agent with Claude + gh CLI + Node + VPN; bash-driven
-  stage pipeline where prompts are markdown files; fresh Claude per stage;
-  artifacts on disk between stages.
+  stage pipeline where each stage is a markdown-defined subagent; fresh
+  Claude per stage; artifacts on disk between stages.
 - [GitHub webhooks documentation](https://docs.github.com/en/webhooks)
 - [GitHub Apps documentation](https://docs.github.com/en/apps)
 - [Anthropic Claude Code](https://docs.claude.com/en/docs/claude-code)

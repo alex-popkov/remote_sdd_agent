@@ -2,10 +2,9 @@ import { loadConfig } from './config';
 import { claimNext, ensureQueueDirs, moveToDone, moveToFailed, type Claim } from './queue';
 import { prepareRunWorkspace, finalizeRunJson } from './runWorkspace';
 import { cloneRepo, createBranch, hasChanges } from './gitOps';
-import { naive } from './claudeCall';
+import { runPipeline, readPipelineOutcome } from './pipeline';
 import { createPr } from './prCreate';
 import { commentOnIssue } from './notify';
-import type { TaskTrigger } from '../../shared/src/types';
 
 const config = loadConfig();
 ensureQueueDirs(config.workspaceDir);
@@ -31,22 +30,11 @@ function now(): string {
   return new Date().toISOString();
 }
 
-/** M4 PR body. M5 replaces this with the embedded spec.md / verdict.txt. */
-function prBody(trigger: TaskTrigger): string {
-  return [
-    `Generated automatically by the remote SDD agent for issue #${trigger.issue.number}.`,
-    '',
-    '> ⚠️ Naive single-pass run (M4). The full SDD pipeline (spec → design → tasks → verify) lands in M5+.',
-    '',
-    `Closes #${trigger.issue.number}.`,
-  ].join('\n');
-}
-
 /**
- * M4 processor: prepare workspace → clone → branch → naive Claude call →
- * (non-empty diff) → open PR + comment back. Finalizes run.json on every
- * exit path and returns the queue disposition; thrown errors are also
- * recorded in run.json before propagating to the loop.
+ * M5 processor: prepare workspace → clone → branch → run the agent SDD
+ * pipeline → (non-empty diff) → open PR (draft on a FAIL verdict) + comment
+ * back. Finalizes run.json on every exit path and returns the queue
+ * disposition; thrown errors are also recorded in run.json before propagating.
  */
 async function processTask(claim: Claim): Promise<'done' | 'failed'> {
   const trigger = claim.payload;
@@ -61,20 +49,24 @@ async function processTask(claim: Claim): Promise<'done' | 'failed'> {
     const branch = await createBranch(dirs.repo, trigger, config.botMention);
     console.log(`[worker] cloned + checked out ${branch}`);
 
-    const code = await naive(trigger, dirs.repo, dirs.logs, config.anthropicApiKey);
+    const code = await runPipeline(dirs, trigger, config);
     if (code !== 0) {
-      throw new Error(`naive claude call exited ${code} (see logs/naive.log)`);
+      throw new Error(`pipeline exited ${code} (see logs/pipeline.log)`);
     }
 
-    // 4.9 empty-diff guard: nothing changed → fail the run, skip PR creation.
+    // Empty-diff guard: nothing changed → fail the run, skip PR creation.
     if (!(await hasChanges(dirs.repo))) {
       console.warn(`[worker] empty diff for ${trigger.triggerId} — skipping PR`);
       finalizeRunJson(dirs, { status: 'failed', failureReason: 'empty-diff' }, now());
       return 'failed';
     }
 
-    const prUrl = await createPr(dirs.repo, trigger, prBody(trigger), config.githubToken);
-    console.log(`[worker] opened PR ${prUrl}`);
+    // Build the PR body + verdict from the agent artifacts; FAIL → draft PR.
+    const { verdict, prBody } = readPipelineOutcome(dirs, trigger);
+    const prUrl = await createPr(dirs.repo, trigger, prBody, config.githubToken, {
+      draft: verdict === 'FAIL',
+    });
+    console.log(`[worker] opened PR ${prUrl} (verdict=${verdict}${verdict === 'FAIL' ? ', draft' : ''})`);
     finalizeRunJson(dirs, { status: 'success', prUrl }, now());
 
     // Notify is best-effort: the PR already exists, so a comment failure must
@@ -82,7 +74,8 @@ async function processTask(claim: Claim): Promise<'done' | 'failed'> {
     try {
       await commentOnIssue(
         trigger,
-        `🤖 Opened a pull request for this issue: ${prUrl}`,
+        `🤖 Opened a pull request for this issue: ${prUrl}` +
+          (verdict === 'FAIL' ? ' (draft — verification did not pass)' : ''),
         config.githubToken,
       );
     } catch (err) {

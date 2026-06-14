@@ -14,6 +14,7 @@ export async function createPr(
   trigger: TaskTrigger,
   body: string,
   githubToken: string,
+  options: { draft?: boolean } = {},
 ): Promise<string> {
   const title = `${trigger.issue.title} (closes #${trigger.issue.number})`;
   const ghEnv = { ...process.env, GH_TOKEN: githubToken };
@@ -35,7 +36,7 @@ export async function createPr(
   ], { cwd: repoDir });
   await runOrThrow('git push', 'git', ['push', '-u', 'origin', branch], { cwd: repoDir });
 
-  const { stdout } = await runOrThrow('gh pr create', 'gh', [
+  const ghArgs = [
     'pr',
     'create',
     '--title',
@@ -44,7 +45,13 @@ export async function createPr(
     body,
     '--label',
     'agent:created',
-  ], { cwd: repoDir, env: ghEnv });
+  ];
+  if (options.draft) ghArgs.push('--draft');
+
+  const { stdout } = await runOrThrow('gh pr create', 'gh', ghArgs, {
+    cwd: repoDir,
+    env: ghEnv,
+  });
 
   // gh prints the PR URL as the last non-empty line of stdout.
   const url = stdout

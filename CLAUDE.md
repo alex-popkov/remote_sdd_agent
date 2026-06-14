@@ -6,12 +6,16 @@ The full specification lives in `spec.md` and is the source of truth. This file 
 
 ## Core idea: Spec-Driven Development (SDD)
 
-Instead of one large "fix the issue" prompt, work is split into small isolated stages. Each stage runs in a **fresh Claude session** and produces one **artifact on disk**. The next stage reads that artifact as input.
+Instead of one large "fix the issue" prompt, work is split into small isolated stages, each driven by a focused, **stack-agnostic subagent** defined in `pipeline/agents/`. Each stage runs in a **fresh Claude session** and reads/writes **artifacts on disk**. The next stage reads those artifacts as input.
 
 Pipeline stages (v1):
-`parse → spec → challenge-spec → design → challenge-design → tasks → implement → verify → pr`
+`task-researcher → task-planner → plan-challenge → task-executor → task-verifier → specification`
 
-Stages 03 (`challenge-spec`) and 05 (`challenge-design`) are deliberately adversarial — their job is to find gaps in the prior stage's output and revise it.
+- `plan-challenge` is a fresh `task-planner` session run in critique mode — deliberately adversarial against the plan (the successor to the old `challenge-spec`/`challenge-design` prompt stages). Gated by `ENABLE_PLAN_CHALLENGE`.
+- `task-verifier` independently checks the implementation against the plan + acceptance criteria and runs the repo's own build/lint/tests, emitting a `VERDICT: PASS|FAIL`. On `FAIL` the pipeline re-runs the executor up to `MAX_VERIFY_RETRIES` times.
+- `specification` (`specification-from-artifacts`) runs only on a `PASS` verdict, writing a committed permanent spec under `.claude/specs/`.
+
+The agents are stack-agnostic: they discover the target repo's language, frameworks, and conventions from the repo itself and its `CLAUDE.md`/skills. PR creation is handled by the worker, not a pipeline stage.
 
 ## Architecture
 
@@ -23,8 +27,8 @@ Two containers wired by a shared volume:
 
 - **`receiver/`** — verifies HMAC, normalizes the event into a `TaskTrigger`, enqueues, ACKs in <100ms. Must respond to GitHub within ~10s.
 - **`worker/`** — claims tasks via atomic `rename()`, clones the repo into `/runs/<id>/repo`, runs `pipeline/pipeline.sh`, opens a PR, comments back on the issue.
-- **`pipeline/`** — `pipeline.sh` plus markdown prompts in `pipeline/prompts/`. Bash loop, no orchestration framework.
-- **`workspace/`** — shared volume: `queue/{pending,processing,done,failed}` and `runs/<triggerId>/{repo,artifacts,logs,run.json}`.
+- **`pipeline/`** — `pipeline.sh` plus stack-agnostic subagents in `pipeline/agents/*.md` (see `pipeline/agents/readme.md`). Bash loop, no orchestration framework.
+- **`workspace/`** — shared volume: `queue/{pending,processing,done,failed}` and `runs/<triggerId>/{repo,artifacts,logs,run.json}`. Agents write to `repo/.claude/sdd-tracking/` (symlinked to `artifacts/`); the permanent spec is committed under `repo/.claude/specs/`.
 
 ### Why two containers
 The receiver must ACK fast; a pipeline run takes 5–30 min. Splitting also lets the receiver restart without losing in-flight work (tasks are files, not memory).
@@ -51,25 +55,25 @@ These come straight from `spec.md §4.1` and `§7`. Don't relax them without exp
 3. **Verify signature before anything else.** Reject in <1ms when invalid.
 4. **`ALLOWED_REPOS` whitelist** is mandatory even with a valid signature (defense in depth if the webhook secret leaks).
 5. **Filter `sender.login` ending in `[bot]`** — anti-loop guard. Without this, the agent's own comments/PRs/labels retrigger it.
-6. **Each pipeline stage = a fresh `claude -p` session.** No state leaks between stages except via files in `artifacts/`.
-7. **One primary output artifact per stage.** Prompts live in `pipeline/prompts/*.md`; treat prompts as data, not code.
+6. **Each pipeline stage = a fresh `claude -p --agent <name>` session.** No state leaks between stages except via files in `repo/.claude/sdd-tracking/`.
+7. **One primary output artifact per stage.** Agents live in `pipeline/agents/*.md`; treat agent definitions as data, not code, and keep them stack-agnostic.
 8. **`MAX_COST_USD` kill-switch** (default $5) checked between stages — abort and comment on the issue if exceeded.
 9. **Dedupe `X-GitHub-Delivery` IDs** in a 24h window to block replay attacks.
 
 ## Data contracts (see `spec.md §5` for full types)
 
 - **`TaskTrigger`** — queue payload. `triggerId = "<repo>-<issue>-<unixMs>"` doubles as the run-dir name.
-- **`context.json`** — output of `parse`; structured summary + acceptance criteria + unknowns.
+- **SDD artifacts** — markdown under `repo/.claude/sdd-tracking/{research,plans,details,prompts,changes,verification}`. The one machine-parsed contract is the verifier's first line, `VERDICT: PASS|FAIL`, which decides normal vs. draft PR.
 - **`run.json`** — per-run metadata: per-stage timings, tokens, cost, exit codes, final status.
 
 ## Configuration (`.env`)
 
 Required: `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, `ALLOWED_REPOS` (CSV of `owner/name`).
-Optional: `TRIGGER_LABEL` (`agent:run`), `BOT_MENTION` (`remote-agent`), `MAX_COST_USD` (`5.00`), `MAX_STAGE_RETRIES` (`3`).
+Optional: `TRIGGER_LABEL` (`agent:run`), `BOT_MENTION` (`remote-agent`), `MAX_COST_USD` (`5.00`), `MAX_STAGE_RETRIES` (`3`), `MAX_VERIFY_RETRIES` (`1`), `ENABLE_PLAN_CHALLENGE` (`true`).
 
 ## Build order
 
-Milestones in `spec.md §8`: **M1** skeleton → **M2** receiver → **M3** worker stub → **M4** worker + naive Claude call (end-to-end without SDD) → **M5** minimum SDD pipeline → **M6** challenge stages → **M7** observability + safety → **M8** polish. Each milestone is independently testable; don't skip ahead.
+Milestones in `spec.md §8`: **M1** skeleton → **M2** receiver → **M3** worker stub → **M4** worker + naive Claude call (end-to-end without SDD) → **M5** minimum agent pipeline (researcher → planner → executor → verifier) → **M6** plan-challenge + specification stages → **M7** observability + safety → **M8** polish. Each milestone is independently testable; don't skip ahead.
 
 ## Explicitly out of scope for v1
 

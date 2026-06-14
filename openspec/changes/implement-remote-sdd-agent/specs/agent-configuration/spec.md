@@ -14,6 +14,8 @@ The system SHALL accept the following environment variables, with the listed def
 | `BOT_MENTION` | no | `remote-agent` | Mention string (without leading `@`) recognized in comments |
 | `MAX_COST_USD` | no | `5.00` | Per-run cost ceiling enforced between stages |
 | `MAX_STAGE_RETRIES` | no | `3` | Per-stage retry budget |
+| `MAX_VERIFY_RETRIES` | no | `1` | Max `task-executor`→`task-verifier` re-runs when the verdict is `FAIL` |
+| `ENABLE_PLAN_CHALLENGE` | no | `true` | Whether to run the adversarial `plan-challenge` stage between planning and execution |
 
 A missing required variable SHALL cause the affected container to exit non-zero on startup with a message naming the missing variable. Defaults SHALL only be applied when the variable is unset (not when it is set to an empty string).
 
