@@ -4,6 +4,8 @@
 export interface WorkerConfig {
   githubToken: string;
   anthropicApiKey: string;
+  /** Branch to clone + base PRs on. Undefined → the repo's default branch. */
+  baseBranch?: string;
   triggerLabel: string;
   botMention: string;
   maxCostUsd: number;
@@ -53,6 +55,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
   return {
     githubToken: required('GITHUB_TOKEN', env.GITHUB_TOKEN),
     anthropicApiKey: required('ANTHROPIC_API_KEY', env.ANTHROPIC_API_KEY),
+    // Empty string → undefined so we never pass `--branch ""` / `--base ""`.
+    baseBranch: env.BASE_BRANCH || undefined,
     triggerLabel: env.TRIGGER_LABEL ?? DEFAULTS.triggerLabel,
     botMention: env.BOT_MENTION ?? DEFAULTS.botMention,
     maxCostUsd: numberOrExit('MAX_COST_USD', env.MAX_COST_USD, DEFAULTS.maxCostUsd),

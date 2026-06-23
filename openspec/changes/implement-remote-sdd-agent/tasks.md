@@ -56,7 +56,7 @@ Tasks are grouped by the 8 phases from `spec.md §8` (M1–M8). Each phase ends 
 - [x] 4.7 Implement `worker/src/notify.ts#commentOnIssue(trigger, body)`: shell out to `gh issue comment <N> --repo <owner>/<name> --body "..."`
 - [x] 4.8 Replace the M3 stub poll-loop body with: prepare workspace → clone → checkout branch → naive Claude call → if diff non-empty: create PR + comment back → move to `done/` or `failed/`
 - [x] 4.9 Add an "empty diff" guard that fails the run with `failureReason: "empty-diff"` and skips PR creation
-- [ ] 4.10 **Acceptance**: label a real issue on a test repo with `$TRIGGER_LABEL`; within ~5 minutes a PR is opened against that issue and the issue receives a comment with the PR URL
+- [x] 4.10 **Acceptance**: label a real issue on a test repo with `$TRIGGER_LABEL`; within ~5 minutes a PR is opened against that issue and the issue receives a comment with the PR URL — verified on `alex-popkov/third-gate-rn` issue #9 → PR #10 (base `develop`) + issue comment
 
 ## 5. M5 — SDD pipeline: minimum viable agent stages
 
@@ -75,7 +75,8 @@ The pipeline is **agent-based**, not prompt-based. Each stage runs a fresh `clau
 - [x] 5.11 Implement the verify→execute feedback loop: if the verdict is `FAIL`, re-run `task-executor` (feeding it the verification report) up to a bounded number of attempts (e.g. `MAX_VERIFY_RETRIES`, default 1), re-running `task-verifier` after each; carry the final verdict forward
 - [x] 5.12 In `worker/src/main.ts`, replace the M4 naive Claude call with a `bash /pipeline/pipeline.sh` invocation; capture the exit code; build the PR body from the plan (`*-plan.instructions.md`), the changes summary (`*-changes.md`), and the verification report (`*-verification.md`)
 - [x] 5.13 If the final verdict is `FAIL`, still open the PR but as **draft** and include the verifier's blocking findings in the PR body
-- [ ] 5.14 **Acceptance**: same trigger as M4; `workspace/runs/<id>/artifacts/` (via the `.claude/sdd-tracking` symlink) contains research, plan, changes, and verification artifacts; the verification artifact carries a `VERDICT:` line; the PR body embeds the plan and the verdict, and the PR is a draft when the verdict is `FAIL`
+- [x] 5.14 **Acceptance**: same trigger as M4; `workspace/runs/<id>/artifacts/` (via the `.claude/sdd-tracking` symlink) contains research, plan, changes, and verification artifacts; the verification artifact carries a `VERDICT:` line; the PR body embeds the plan and the verdict, and the PR is a draft when the verdict is `FAIL` — verified on issue #9 (`VERDICT: PASS` → normal PR #10)
+- [ ] 5.15 **Follow-up (verify-loop robustness)**: on a real run, `task-verifier` prepended a `<!-- markdownlint-disable-file -->` line, pushing `VERDICT: PASS` off line 1; `read_verdict` only checked `head -1` and misread it as `FAIL`, triggering a needless re-execute. `read_verdict` now scans for the first `VERDICT:` line (fixed). Remaining gap: the re-execute loop (5.11) re-runs `task-executor` requiring a **fresh** `*-changes.md`, but when the executor addresses findings without rewriting that file (or has nothing new to do) the stage fails after `MAX_STAGE_RETRIES` ("no `*-changes.md` after 3 attempts"). Allow an in-place mtime bump / no-op as success for the executor on retry, mirroring the rule M6 task 6.2 adds for plan-challenge.
 
 ## 6. M6 — SDD pipeline: full agent pipeline (challenge + specification)
 

@@ -7,14 +7,15 @@ import type { TaskTrigger } from '../../shared/src/types';
  *
  * `gh` authenticates from GH_TOKEN in the environment. The push reuses the
  * token-embedded remote set up by cloneRepo, so no extra git auth is needed.
- * `--base` is omitted: `gh` defaults it to the base repo's default branch.
+ * When `options.baseBranch` is set the PR targets it; otherwise `--base` is
+ * omitted and `gh` defaults to the base repo's default branch.
  */
 export async function createPr(
   repoDir: string,
   trigger: TaskTrigger,
   body: string,
   githubToken: string,
-  options: { draft?: boolean } = {},
+  options: { draft?: boolean; baseBranch?: string } = {},
 ): Promise<string> {
   const title = `${trigger.issue.title} (closes #${trigger.issue.number})`;
   const ghEnv = { ...process.env, GH_TOKEN: githubToken };
@@ -36,9 +37,34 @@ export async function createPr(
   ], { cwd: repoDir });
   await runOrThrow('git push', 'git', ['push', '-u', 'origin', branch], { cwd: repoDir });
 
+  // `gh pr create --label` hard-fails if the label doesn't exist in the repo
+  // ("could not add label: 'agent:created' not found"). Ensure it exists first;
+  // `gh label create` exits non-zero when the label already exists, so treat
+  // any failure as "already there" and move on.
+  try {
+    await runOrThrow('gh label create', 'gh', [
+      'label',
+      'create',
+      'agent:created',
+      '--description',
+      'Pull request opened by the remote SDD agent',
+      '--color',
+      '5319E7',
+    ], { cwd: repoDir, env: ghEnv });
+  } catch {
+    // label already exists (or insufficient perms) — proceed regardless.
+  }
+
   const ghArgs = [
     'pr',
     'create',
+    // Name the head branch explicitly. cloneRepo's remote has no
+    // `refs/remotes/origin/*` fetch refspec, so `git push -u` can't store a
+    // remote-tracking branch and gh's auto-detection aborts with "you must
+    // first push the current branch to a remote". The branch IS pushed (above),
+    // so --head makes the PR head deterministic and bypasses that detection.
+    '--head',
+    branch,
     '--title',
     title,
     '--body',
@@ -46,6 +72,9 @@ export async function createPr(
     '--label',
     'agent:created',
   ];
+  // Target the configured base branch (e.g. develop) instead of the repo
+  // default; omitted → gh defaults to the base repo's default branch.
+  if (options.baseBranch) ghArgs.push('--base', options.baseBranch);
   if (options.draft) ghArgs.push('--draft');
 
   const { stdout } = await runOrThrow('gh pr create', 'gh', ghArgs, {

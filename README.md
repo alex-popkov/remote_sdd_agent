@@ -9,24 +9,68 @@ The architecture, contracts, and security model are documented in
 
 ## Status
 
-Day 1: webhook receiver + worker skeleton + file queue. The worker claims
-tasks but does not yet run the SDD pipeline. Subsequent milestones (M4–M8)
-wire in cloning, Claude calls, the staged pipeline, and the cost kill-switch.
+Webhook receiver + file queue + worker are wired end-to-end, and the worker
+runs the agent-based SDD pipeline (`task-researcher → task-planner →
+task-executor → task-verifier`) to turn a labeled issue into a PR. Remaining
+milestones (M6–M8) add the plan-challenge + specification stages,
+observability, and the cost kill-switch.
 
-## Setup — 5 steps from a clean clone
+## Prerequisites
 
-### 1. Create a GitHub App (or a fine-grained PAT)
+Install these before you start:
 
-Go to <https://github.com/settings/apps/new>. Required permissions on the
-repos the agent will work on:
+- **Docker** with Compose v2 (`docker compose version`) — runs both containers.
+- **A GitHub account** with admin access to a test repo you can label issues on.
+- **An Anthropic API key** — used by the worker's `claude` CLI to run the pipeline.
+- **`openssl`** — to generate the webhook secret (preinstalled on macOS/Linux).
+- **A tunneling tool** (`ngrok` or `cloudflared`) — to expose your local
+  receiver to GitHub. Only needed for the real end-to-end run, not the smoke test.
 
-- **Contents**: Read & write
-- **Issues**: Read & write
-- **Pull requests**: Read & write
-- **Metadata**: Read (auto)
+## Run it — step by step from a clean clone
 
-Subscribe to: **Issues**, **Issue comment**. Install on your target repo(s).
-A fine-grained PAT with the same scopes also works for purely local testing.
+### 1. Create a GitHub token (App, fine-grained PAT, or classic PAT)
+
+`GITHUB_TOKEN` authenticates every GitHub operation the worker performs:
+`git clone` + push the agent's branch, `gh pr create` (including draft PRs on a
+`FAIL` verdict), reading the issue body/labels, and `gh issue comment` to post
+the PR URL back. Grant the **minimum** that covers those — per `spec.md §7`,
+the token should be scoped to the `ALLOWED_REPOS` and unable to read anything
+else. Pick one of the three options below.
+
+#### Option A — Fine-grained PAT (simplest, recommended for local use)
+
+Go to <https://github.com/settings/tokens?type=beta>. Under **Repository
+access**, choose **Only select repositories** and pick exactly the repos in
+`ALLOWED_REPOS`. Set these **Repository permissions**:
+
+| Permission | Level | Why |
+|---|---|---|
+| **Contents** | Read & write | clone + push the feature branch |
+| **Pull requests** | Read & write | `gh pr create` (normal + draft PRs) |
+| **Issues** | Read & write | read issue/labels, comment the PR URL back |
+| **Metadata** | Read | mandatory, auto-selected |
+| **Workflows** | Read & write | *only if* the agent may edit `.github/workflows/` — pushes touching workflow files are rejected without it |
+
+#### Option B — GitHub App (best for a long-lived org bot)
+
+Go to <https://github.com/settings/apps/new>. Set the same **Repository
+permissions** as the table above, then subscribe to the **Issues** and
+**Issue comment** webhook events and install the App on your target repo(s).
+Use an installation token as `GITHUB_TOKEN`. An App is the cleanest fit for a
+persistent bot: installation tokens auto-expire, access is per-repo, and the
+App's `[bot]` sender login is filtered by the anti-loop guard (`spec.md §4.1`,
+rule #5).
+
+#### Option C — Classic PAT (coarse; avoid unless you must)
+
+Go to <https://github.com/settings/tokens/new> and select the **`repo`** scope
+(covers clone/push, PRs, and issue comments), plus **`workflow`** only if the
+agent may modify `.github/workflows/`. Note that classic `repo` grants access
+to **all** your repositories, which conflicts with the per-repo scoping above —
+prefer Option A or B.
+
+> The webhook itself is verified with `GITHUB_WEBHOOK_SECRET` (HMAC), not the
+> token, so no admin/webhook permission is required on `GITHUB_TOKEN`.
 
 ### 2. Copy `.env.example` to `.env` and fill required values
 
@@ -61,7 +105,17 @@ docker compose up --build
 ```
 
 You should see the receiver listening on `:3000` and the worker polling
-`/workspace/queue/pending`.
+`/workspace/queue/pending`. Leave this running; open a second terminal for the
+verify step. To run detached instead, use `docker compose up --build -d` and
+follow logs with `docker compose logs -f`.
+
+> **Always pass `--build` after changing source.** The containers run compiled
+> code baked into the image, not the files on disk. `docker compose up -d`
+> alone — even with `--force-recreate` — reuses the existing image and silently
+> runs **stale code** (e.g. an old worker that prints `would run pipeline` and
+> marks tasks `done` without cloning or opening a PR). Editing `.env` does take
+> effect on plain recreate, but any change under `receiver/`, `worker/`, or
+> `shared/` requires a rebuild: `docker compose up -d --build`.
 
 ### 5. Verify end-to-end
 
@@ -73,9 +127,27 @@ issue on a whitelisted repo, **or** post a comment containing
 [worker] claimed acme__widgets__42__1717000000000.json
 ```
 
-For a no-GitHub smoke test, run `bash scripts/smoke-test.sh` — it signs
-local payloads with your webhook secret and exercises the four response
-codes (202/204/401 + queue file appearance).
+Within ~5 minutes the worker clones the repo, runs the pipeline, opens a PR
+against the issue, and posts a comment on the issue with the PR URL.
+
+### Fast path: smoke test without GitHub
+
+To exercise the receiver → queue → worker pipe with no GitHub App or tunnel,
+run (with `docker compose up` already running and `.env` populated):
+
+```bash
+bash scripts/smoke-test.sh
+```
+
+It signs local payloads with your webhook secret and checks the receiver's
+response codes (202/204/401) and that a queue file appears in `pending/`.
+
+### Stopping and resetting
+
+```bash
+docker compose down            # stop both containers
+rm -rf workspace/queue/* workspace/runs/*   # clear queue + run dirs (optional)
+```
 
 ## Architecture (one paragraph)
 

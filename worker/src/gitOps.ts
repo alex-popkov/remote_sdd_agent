@@ -30,12 +30,17 @@ export async function cloneRepo(
   trigger: TaskTrigger,
   dest: string,
   githubToken: string,
+  baseBranch?: string,
 ): Promise<void> {
   const { owner, name } = trigger.repo;
   const url = `https://x-access-token:${githubToken}@github.com/${owner}/${name}`;
-  // depth=1: the agent works against the default branch tip; full history is
-  // unnecessary and slower to fetch.
-  await runOrThrow('git clone', 'git', ['clone', '--depth', '1', url, dest]);
+  // depth=1: the agent works against the branch tip; full history is
+  // unnecessary and slower to fetch. With baseBranch set, clone that branch so
+  // the agent — and the verifier — work against it instead of the repo default.
+  const args = ['clone', '--depth', '1'];
+  if (baseBranch) args.push('--branch', baseBranch);
+  args.push(url, dest);
+  await runOrThrow('git clone', 'git', args);
 }
 
 /**

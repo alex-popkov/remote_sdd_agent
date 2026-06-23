@@ -45,7 +45,7 @@ async function processTask(claim: Claim): Promise<'done' | 'failed'> {
 
   const dirs = prepareRunWorkspace(config.workspaceDir, trigger, now());
   try {
-    await cloneRepo(trigger, dirs.repo, config.githubToken);
+    await cloneRepo(trigger, dirs.repo, config.githubToken, config.baseBranch);
     const branch = await createBranch(dirs.repo, trigger, config.botMention);
     console.log(`[worker] cloned + checked out ${branch}`);
 
@@ -65,6 +65,7 @@ async function processTask(claim: Claim): Promise<'done' | 'failed'> {
     const { verdict, prBody } = readPipelineOutcome(dirs, trigger);
     const prUrl = await createPr(dirs.repo, trigger, prBody, config.githubToken, {
       draft: verdict === 'FAIL',
+      baseBranch: config.baseBranch,
     });
     console.log(`[worker] opened PR ${prUrl} (verdict=${verdict}${verdict === 'FAIL' ? ', draft' : ''})`);
     finalizeRunJson(dirs, { status: 'success', prUrl }, now());

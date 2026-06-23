@@ -152,9 +152,15 @@ latest_verification() {
 }
 
 read_verdict() {
-  local f
+  local f line
   f="$(latest_verification || true)"
-  if [ -n "$f" ] && head -1 "$f" | grep -q 'PASS'; then
+  [ -n "$f" ] || { echo FAIL; return; }
+  # The contract is a 'VERDICT: PASS|FAIL' line. The agent is asked to put it on
+  # line 1, but it sometimes prepends a markdownlint comment / blank line, so
+  # scan for the first VERDICT: line instead of trusting head -1. Anchoring on
+  # the token also avoids matching the word PASS/FAIL elsewhere in the prose.
+  line="$(grep -m1 -iE '^[[:space:]]*VERDICT:' "$f" || true)"
+  if printf '%s' "$line" | grep -qiE 'VERDICT:[[:space:]]*PASS'; then
     echo PASS
   else
     echo FAIL

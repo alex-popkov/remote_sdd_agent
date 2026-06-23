@@ -27,6 +27,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && claude --version
 
+# The pipeline drives `claude` non-interactively with
+# `--permission-mode bypassPermissions`. The CLI refuses bypass mode when
+# running as root ("--dangerously-skip-permissions cannot be used with
+# root/sudo privileges") unless it knows it's in an isolated sandbox. This
+# worker container IS that sandbox (no other workload, ephemeral run dirs), so
+# declare it. Without this every pipeline stage exits non-zero and writes no
+# artifact. Revisit if the worker is ever switched to a non-root user.
+ENV IS_SANDBOX=1
+
 WORKDIR /app
 
 # Bring in shared types alongside the worker source.
