@@ -5,6 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import request from 'supertest';
 import { createApp } from '../src/app';
+import { openDeliveryStore, DEDUPE_WINDOW_SECONDS } from '../src/dedupe';
 import type { ReceiverConfig } from '../src/config';
 
 const SECRET = 'integration-secret';
@@ -134,6 +135,64 @@ describe('POST /webhook', () => {
       .set('Content-Type', 'application/json')
       .send(body);
     expect(res.status).toBe(204);
+  });
+
+  describe('replay dedupe (X-GitHub-Delivery)', () => {
+    const labeled = JSON.stringify({
+      action: 'labeled',
+      repository: baseRepo,
+      issue: baseIssue,
+      label: { name: 'agent:run' },
+      sender: { login: 'alice' },
+    });
+    const deliver = (target: ReturnType<typeof createApp>, deliveryId: string) =>
+      request(target)
+        .post('/webhook')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'issues')
+        .set('X-GitHub-Delivery', deliveryId)
+        .set('X-Hub-Signature-256', sign(labeled))
+        .send(labeled);
+    const pendingCount = () =>
+      fs
+        .readdirSync(path.join(config.workspaceDir, 'queue', 'pending'))
+        .filter(f => f.endsWith('.json') && !f.startsWith('.')).length;
+
+    it('enqueues the first delivery, answers a replay with duplicate, and forgets it after 24h', async () => {
+      let clock = 1_800_000_000;
+      const store = openDeliveryStore(path.join(config.workspaceDir, 'state', 'deliveries.db'), () => clock);
+      const clocked = createApp(config, store);
+
+      const first = await deliver(clocked, 'abc-123');
+      expect(first.status).toBe(202);
+      expect(pendingCount()).toBe(1);
+
+      const replay = await deliver(clocked, 'abc-123');
+      expect(replay.status).toBe(200);
+      expect(replay.body).toEqual({ status: 'duplicate' });
+      expect(pendingCount()).toBe(1);
+
+      clock += DEDUPE_WINDOW_SECONDS + 1;
+      await new Promise(r => setTimeout(r, 2)); // distinct triggerId (unix ms)
+      const later = await deliver(clocked, 'abc-123');
+      expect(later.status).toBe(202);
+      expect(pendingCount()).toBe(2);
+      store.close();
+    });
+
+    it('does not record deliveries that fail signature verification', async () => {
+      const bad = await request(app)
+        .post('/webhook')
+        .set('Content-Type', 'application/json')
+        .set('X-GitHub-Event', 'issues')
+        .set('X-GitHub-Delivery', 'forged')
+        .set('X-Hub-Signature-256', 'sha256=deadbeef')
+        .send(labeled);
+      expect(bad.status).toBe(401);
+
+      const good = await deliver(app, 'forged');
+      expect(good.status).toBe(202);
+    });
   });
 
   it('returns 200 ok on /health', async () => {

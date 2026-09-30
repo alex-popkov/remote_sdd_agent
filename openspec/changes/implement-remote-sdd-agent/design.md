@@ -83,7 +83,7 @@ Each stage starts a **fresh** `claude -p` session — no session resume flags, n
 
 ### D6. Cost accounting
 
-`claude -p` emits usage info on stderr (token counts; cost depends on model pricing). The pipeline driver parses these and appends a row to `run.json` after each stage. Cost = `inputTokens * input_rate + outputTokens * output_rate` using a `MODEL_PRICING` table baked into the worker, keyed by model id and covering the models the agents declare (the agents pin `opus`/`sonnet` per their frontmatter).
+`claude -p --output-format json` prints a result object whose `modelUsage` map carries per-model input, output, cache-read and cache-write token counts. `pipeline.sh` saves that result per attempt under `logs/usage/` and, after each stage, calls the worker's compiled `recordStage.js`, which sums the attempts, prices them, and appends a row to `run.json`. Cost = uncached input × input rate + cache writes × 2 × input rate (1h TTL, the conservative case) + cache reads × cache-read rate + output × output rate, using a `MODEL_PRICING` table baked into the worker (`worker/src/pricing.ts`), keyed by model-id prefix. Ids missing from the table are priced at the highest rate so the kill-switch never under-counts. Cache reads dominate a Claude Code session's input, so pricing all input at the full rate would overstate cost several times over.
 
 Between stages, `pipeline.sh` reads `run.json`, sums `totalCostUsd`, and aborts with exit code 42 if `>= MAX_COST_USD`. The worker treats exit-42 specially: marks `status: aborted-cost`, posts a comment on the issue with the breakdown, moves the task to `failed/`.
 

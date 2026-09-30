@@ -33,8 +33,15 @@ export interface StageRecord {
   name: string;
   attempts: number;
   durationMs: number;
+  /** All input tokens, including the cache-read/cache-write portions below. */
   inputTokens: number;
   outputTokens: number;
+  /** Portion of inputTokens served from the prompt cache. */
+  cacheReadTokens?: number;
+  /** Portion of inputTokens written to the prompt cache. */
+  cacheWriteTokens?: number;
+  /** Model ids that served the stage (a session may use more than one). */
+  models?: string[];
   costUsd: number;
   exitCode: number;
 }

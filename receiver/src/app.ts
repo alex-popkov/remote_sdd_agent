@@ -1,9 +1,11 @@
+import path from 'node:path';
 import express, { Request, Response } from 'express';
 import { verifySignature } from './verifySignature';
 import { isBotSender } from './filters/botFilter';
 import { isAllowedRepo } from './filters/repoFilter';
 import { mapToTrigger, type WebhookPayload } from './triggerMap';
 import { enqueue, ensureQueueDirs } from './enqueue';
+import { openDeliveryStore, type DeliveryStore } from './dedupe';
 import type { ReceiverConfig } from './config';
 
 /**
@@ -11,7 +13,10 @@ import type { ReceiverConfig } from './config';
  * touching process.env or binding a port. server.ts is the production entry
  * point that calls loadConfig() and app.listen().
  */
-export function createApp(config: ReceiverConfig) {
+export function createApp(
+  config: ReceiverConfig,
+  deliveries: DeliveryStore = openDeliveryStore(path.join(config.workspaceDir, 'state', 'deliveries.db')),
+) {
   ensureQueueDirs(config.workspaceDir);
 
   const app = express();
@@ -40,20 +45,31 @@ export function createApp(config: ReceiverConfig) {
     }
 
     const eventType = req.header('X-GitHub-Event') ?? '';
-    const deliveryId = req.header('X-GitHub-Delivery') ?? 'unknown';
+    const deliveryId = req.header('X-GitHub-Delivery');
     const payload = req.body as WebhookPayload;
 
-    // 2. Drop bots before anything else (anti-loop guard).
+    // 2. Replay guard: every authenticated delivery id is recorded for 24h; a
+    // repeat is acknowledged but never processed again.
+    try {
+      if (deliveryId && deliveries.checkAndRecord(deliveryId)) {
+        return res.status(200).json({ status: 'duplicate' });
+      }
+    } catch (err) {
+      console.error('dedupe store failed:', err);
+      return res.status(500).json({ error: 'dedupe failed' });
+    }
+
+    // 3. Drop bots before anything else (anti-loop guard).
     if (isBotSender(payload)) {
       return res.status(204).end();
     }
 
-    // 3. Drop events for repos not on the allowlist, even with a valid signature.
+    // 4. Drop events for repos not on the allowlist, even with a valid signature.
     if (!isAllowedRepo(payload, config.allowedRepos)) {
       return res.status(204).end();
     }
 
-    // 4. Map to a TaskTrigger; 204 if the event isn't one we care about.
+    // 5. Map to a TaskTrigger; 204 if the event isn't one we care about.
     const trigger = mapToTrigger(eventType, payload, {
       triggerLabel: config.triggerLabel,
       statusLabel: config.statusLabel,
@@ -63,18 +79,21 @@ export function createApp(config: ReceiverConfig) {
       return res.status(204).end();
     }
 
-    // 5. Enqueue and ack. GitHub gives us ~10s; we ack inside ~100ms by doing
-    // exactly one synchronous fs write here and no further work.
+    // 6. Enqueue and ack. GitHub gives us ~10s; we ack inside ~100ms by doing
+    // one synchronous queue-file write (plus the dedupe insert above) and no
+    // further work.
     try {
       const triggerId = enqueue(config.workspaceDir, trigger);
       console.log(
         `enqueued triggerId=${triggerId} source=${trigger.source} ` +
           `repo=${trigger.repo.owner}/${trigger.repo.name} issue=#${trigger.issue.number} ` +
-          `delivery=${deliveryId}`,
+          `delivery=${deliveryId ?? 'none'}`,
       );
       return res.status(202).json({ triggerId });
     } catch (err) {
       console.error('enqueue failed:', err);
+      // Nothing was queued: let GitHub's redelivery (same id) through.
+      if (deliveryId) deliveries.forget(deliveryId);
       return res.status(500).json({ error: 'enqueue failed' });
     }
   });

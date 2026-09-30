@@ -21,7 +21,7 @@ Each run SHALL produce a `workspace/runs/<triggerId>/run.json` file conforming t
 
 ### Requirement: Per-stage token and cost capture
 
-For each stage, the pipeline SHALL record `inputTokens`, `outputTokens`, and `costUsd`. Cost SHALL be computed locally as `inputTokens * input_rate + outputTokens * output_rate` using a per-model pricing table maintained in the worker codebase. Token counts SHALL be parsed from `claude -p` output (stderr or a structured output mode), not estimated.
+For each stage, the pipeline SHALL record `inputTokens`, `outputTokens`, and `costUsd`. Cost SHALL be computed locally as `inputTokens * input_rate + outputTokens * output_rate` using a per-model pricing table maintained in the worker codebase, with the prompt-cache portions of the input priced at their own rates (cache reads and cache writes); `inputTokens` includes those cached portions. Token counts SHALL be parsed from `claude -p` output (its `--output-format json` result), not estimated.
 
 #### Scenario: Cost is computed from real token counts
 

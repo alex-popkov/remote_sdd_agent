@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import * as runJson from './runJson';
 import type { RunMetadata, TaskTrigger } from '../../shared/src/types';
 
 /**
@@ -7,14 +8,13 @@ import type { RunMetadata, TaskTrigger } from '../../shared/src/types';
  *
  * Layout (worker-runner spec):
  *   repo/       — the cloned target repository
- *   artifacts/  — pipeline stage outputs (context.json, spec.md, ...) [M5+]
- *   logs/       — per-stage / naive-call logs
+ *   artifacts/  — symlink to repo/.claude/sdd-tracking (agent artifacts)
+ *   logs/       — per-stage logs + logs/usage/*.json (claude usage per attempt)
  *   run.json    — RunMetadata, updated to a terminal status before the task
  *                 file leaves processing/
  *
- * run.json is written atomically (tmp + rename) so a concurrent reader never
- * sees a half-written file. Richer per-stage accounting lands in M7
- * (worker/src/runJson.ts); M4 only needs init + terminal finalize.
+ * run.json itself is owned by runJson.ts (atomic writes, per-stage records
+ * appended by the pipeline, exactly-once finalize); these are thin wrappers.
  */
 export interface RunDirs {
   root: string;
@@ -45,44 +45,25 @@ export function prepareRunWorkspace(
   for (const dir of [dirs.repo, dirs.artifacts, dirs.logs]) {
     fs.mkdirSync(dir, { recursive: true });
   }
-
-  const initial: RunMetadata = {
-    triggerId: trigger.triggerId,
-    startedAt: now,
-    status: 'running',
-    stages: [],
-    totalCostUsd: 0,
-  };
-  writeRunJson(dirs, initial);
+  runJson.init(dirs.root, trigger, now);
   return dirs;
 }
 
 export function readRunJson(dirs: RunDirs): RunMetadata {
-  return JSON.parse(fs.readFileSync(dirs.runJson, 'utf-8')) as RunMetadata;
-}
-
-export function writeRunJson(dirs: RunDirs, metadata: RunMetadata): void {
-  const tmp = `${dirs.runJson}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(metadata, null, 2), 'utf-8');
-  fs.renameSync(tmp, dirs.runJson);
+  return runJson.read(dirs.root);
 }
 
 /**
  * Set the terminal status (and optional prUrl / failureReason / endedAt) on
- * run.json. Read-modify-write so any fields written earlier survive.
+ * run.json. Read-modify-write so stage records written by the pipeline
+ * survive; a second call on an already-terminal run is a no-op.
  */
 export function finalizeRunJson(
   dirs: RunDirs,
-  patch: Pick<RunMetadata, 'status'> &
+  patch: { status: runJson.TerminalStatus } &
     Partial<Pick<RunMetadata, 'endedAt' | 'prUrl' | 'failureReason'>>,
   now: string,
 ): RunMetadata {
-  const current = readRunJson(dirs);
-  const next: RunMetadata = {
-    ...current,
-    ...patch,
-    endedAt: patch.endedAt ?? now,
-  };
-  writeRunJson(dirs, next);
-  return next;
+  const { status, ...extra } = patch;
+  return runJson.finalize(dirs.root, status, extra, now);
 }

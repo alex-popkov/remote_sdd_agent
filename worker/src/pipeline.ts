@@ -5,6 +5,12 @@ import type { RunDirs } from './runWorkspace';
 import type { WorkerConfig } from './config';
 import type { TaskTrigger } from '../../shared/src/types';
 
+/** Compiled stage recorder (recordStage.ts) invoked by pipeline.sh after each stage. */
+const RECORD_STAGE_JS = path.join(__dirname, 'recordStage.js');
+
+/** pipeline.sh exit code for "MAX_COST_USD reached" (sdd-pipeline spec). */
+export const COST_ABORT_EXIT_CODE = 42;
+
 /**
  * M5: run the agent-based SDD pipeline (`pipeline/pipeline.sh`) as a fresh
  * process, with the flattened TaskTrigger fields and run paths exported as
@@ -12,7 +18,8 @@ import type { TaskTrigger } from '../../shared/src/types';
  * directory and environment per stage").
  *
  * Returns the pipeline's exit code: 0 = completed (the verdict is read
- * separately from the verification artifact), non-zero = a stage hard-failed.
+ * separately from the verification artifact), 42 = cost ceiling reached,
+ * other non-zero = a stage hard-failed.
  */
 export async function runPipeline(
   dirs: RunDirs,
@@ -26,6 +33,10 @@ export async function runPipeline(
     MAX_STAGE_RETRIES: String(config.maxStageRetries),
     MAX_VERIFY_RETRIES: String(config.maxVerifyRetries),
     ENABLE_PLAN_CHALLENGE: String(config.enablePlanChallenge),
+    MAX_COST_USD: String(config.maxCostUsd),
+    // Per-stage cost accounting (run.json) + the kill-switch need the compiled
+    // recorder; absent (e.g. running from .ts sources) → pipeline skips both.
+    ...(fs.existsSync(RECORD_STAGE_JS) ? { RECORD_STAGE_JS } : {}),
     // Flattened TaskTrigger — consumed by pipeline.sh / the agents.
     TRIGGER_ID: trigger.triggerId,
     TRIGGER_SOURCE: trigger.source,

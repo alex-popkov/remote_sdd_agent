@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# SDD agent pipeline (M6: full agent pipeline — challenge + specification).
+# SDD agent pipeline (M6 stages + M7 per-stage cost accounting and kill-switch).
 #
 # Drives a sequence of stack-agnostic subagents (pipeline/agents/*.md), each in
 # a fresh `claude -p` session, communicating only through files under
@@ -22,9 +22,14 @@
 #   MAX_VERIFY_RETRIES    (default 1)     executor<->verifier re-runs on FAIL
 #   ENABLE_PLAN_CHALLENGE (default true)  run the adversarial plan-challenge pass
 #   AGENTS_DIR            (default <script dir>/agents)
+#   MAX_COST_USD          (default 5.00)  per-run cost ceiling, checked between stages
+#   RECORD_STAGE_JS       path to the worker's compiled recordStage.js; appends a
+#                         per-stage record (tokens, cost, duration) to run.json.
+#                         Unset → no cost accounting and no kill-switch.
 #
 # Exit codes: 0 = pipeline completed (verdict may be PASS or FAIL — the worker
-# inspects the verification artifact); non-zero = a stage hard-failed.
+# inspects the verification artifact); 42 = cost ceiling hit (run.json
+# totalCostUsd >= MAX_COST_USD); other non-zero = a stage hard-failed.
 
 set -euo pipefail
 
@@ -42,8 +47,12 @@ export LOGS_DIR="$RUN_DIR/logs"
 SDD_DIR="$REPO_DIR/.claude/sdd-tracking"
 MAX_STAGE_RETRIES="${MAX_STAGE_RETRIES:-3}"
 MAX_VERIFY_RETRIES="${MAX_VERIFY_RETRIES:-1}"
+MAX_COST_USD="${MAX_COST_USD:-5.00}"
 
-mkdir -p "$LOGS_DIR"
+# One `claude --output-format json` result per attempt; recordStage reads the
+# token usage from these.
+USAGE_DIR="$LOGS_DIR/usage"
+mkdir -p "$LOGS_DIR" "$USAGE_DIR"
 
 log() { echo "[pipeline] $*"; }
 
@@ -127,7 +136,69 @@ invoke_agent() {
   instruction="$(stage_instruction "$stage")"
   ( cd "$REPO_DIR" && claude -p "$instruction" \
       --agent "$agent" \
+      --output-format json \
       --permission-mode bypassPermissions )
+}
+
+# --- 7.3 per-attempt usage capture + stage accounting ------------------------
+
+STAGE_USAGE=()   # usage files of the current stage's attempts
+USAGE_SEQ=0
+LAST_RC=0        # claude exit code of the most recent attempt
+RUN_TOTAL_USD="" # run.json totalCostUsd after the latest record_stage
+
+# stage_begin <stage>: start the stage clock (marker mtime) and reset usage.
+stage_begin() {
+  export STAGE_NAME="$1"
+  rm -f "$LOGS_DIR/.$1.t0"
+  : > "$LOGS_DIR/.$1.t0"
+  STAGE_USAGE=()
+}
+
+# attempt_agent <stage-label> <agent-name> <log-header>
+# One claude session. Its JSON result (stdout) goes to a usage file and is also
+# appended to the stage log with stderr, so the log keeps the full history.
+attempt_agent() {
+  local stage="$1" agent="$2" header="$3" logfile="$LOGS_DIR/$1.log" out
+  USAGE_SEQ=$((USAGE_SEQ + 1))
+  out="$USAGE_DIR/$(printf '%02d' "$USAGE_SEQ")-$stage.json"
+  STAGE_USAGE+=("$out")
+  LAST_RC=0
+  echo "=== $header ===" >> "$logfile"
+  invoke_agent "$stage" "$agent" > "$out" 2>> "$logfile" || LAST_RC=$?
+  { cat "$out"; echo; } >> "$logfile"
+  [ "$LAST_RC" -eq 0 ] || echo "[pipeline] $stage exited $LAST_RC" >> "$logfile"
+}
+
+# record_stage <stage> <attempts> <exitCode>
+# Append the stage record to run.json (tokens + cost across all attempts,
+# duration since stage_begin) and remember the new run total.
+record_stage() {
+  local stage="$1" attempts="$2" code="$3" t0="$LOGS_DIR/.$1.t0" total
+  if [ -z "${RECORD_STAGE_JS:-}" ]; then
+    rm -f "$t0"
+    return 0
+  fi
+  if total="$(node "$RECORD_STAGE_JS" "$RUN_DIR" "$stage" "$attempts" "$code" "$t0" \
+      ${STAGE_USAGE[@]+"${STAGE_USAGE[@]}"})"; then
+    RUN_TOTAL_USD="$total"
+    log "stage $stage cost recorded — run total \$$total"
+  else
+    log "WARN: could not record cost for stage $stage"
+  fi
+  rm -f "$t0"
+}
+
+# --- 7.4 cost kill-switch ----------------------------------------------------
+
+# Called between stages: abort with exit 42 once the run total reaches the
+# ceiling. The worker turns 42 into status aborted-cost + an issue comment.
+check_budget() {
+  [ -n "$RUN_TOTAL_USD" ] || return 0
+  if awk -v t="$RUN_TOTAL_USD" -v m="$MAX_COST_USD" 'BEGIN { exit !(t + 0 >= m + 0) }'; then
+    log "COST CEILING: run total \$$RUN_TOTAL_USD >= MAX_COST_USD \$$MAX_COST_USD — aborting"
+    exit 42
+  fi
 }
 
 # --- 5.1 / 5.2 run_stage with retry + artifact check -------------------------
@@ -138,22 +209,19 @@ invoke_agent() {
 # <agent-name> defaults to <stage-label> when omitted.
 run_stage() {
   local stage="$1" dir="$2" pattern="$3" agent="${4:-$1}"
-  export STAGE_NAME="$stage"
-  local logfile="$LOGS_DIR/$stage.log"
   local marker="$LOGS_DIR/.$stage.start"
   local attempt=1
+  stage_begin "$stage"
 
   while [ "$attempt" -le "$MAX_STAGE_RETRIES" ]; do
     log "stage $stage (attempt $attempt/$MAX_STAGE_RETRIES)"
-    : > "$marker"   # marker mtime == stage start
-    {
-      echo "=== $stage attempt $attempt ==="
-      invoke_agent "$stage" "$agent" 2>&1 || echo "[pipeline] $stage exited non-zero"
-    } >> "$logfile" 2>&1
+    : > "$marker"   # marker mtime == attempt start
+    attempt_agent "$stage" "$agent" "$stage attempt $attempt"
 
     if find "$dir" -type f -name "$pattern" -newer "$marker" 2>/dev/null | grep -q .; then
       rm -f "$marker"
       log "stage $stage ok"
+      record_stage "$stage" "$attempt" 0
       return 0
     fi
     attempt=$((attempt + 1))
@@ -161,6 +229,9 @@ run_stage() {
 
   rm -f "$marker"
   log "stage $stage FAILED: no '$pattern' in $dir after $MAX_STAGE_RETRIES attempts"
+  # A missing artifact after a clean exit is still a stage failure.
+  [ "$LAST_RC" -ne 0 ] || LAST_RC=1
+  record_stage "$stage" "$MAX_STAGE_RETRIES" "$LAST_RC"
   return 1
 }
 
@@ -170,15 +241,12 @@ run_stage() {
 # rewrites the plan/details in place. A sound plan legitimately yields no edits,
 # so "no changes" is a normal outcome, not a failure.
 run_plan_challenge() {
-  export STAGE_NAME="plan-challenge"
   local marker="$LOGS_DIR/.plan-challenge.start"
+  stage_begin "plan-challenge"
   : > "$marker"
   log "stage plan-challenge (revise plan in place)"
-  {
-    echo "=== plan-challenge ==="
-    invoke_agent "plan-challenge" "task-planner" 2>&1 \
-      || echo "[pipeline] plan-challenge exited non-zero"
-  } >> "$LOGS_DIR/plan-challenge.log" 2>&1
+  attempt_agent "plan-challenge" "task-planner" "plan-challenge"
+  record_stage "plan-challenge" 1 "$LAST_RC"
 
   if find "$SDD_DIR/plans" "$SDD_DIR/details" -type f -newer "$marker" 2>/dev/null | grep -q .; then
     log "plan-challenge ok — plan revised"
@@ -195,16 +263,13 @@ run_plan_challenge() {
 # returns success. Success is keyed on .claude/specs/INDEX.md being updated
 # (the agent always maintains it; individual spec filenames vary).
 run_specification() {
-  export STAGE_NAME="specification"
   local specs_dir="$REPO_DIR/.claude/specs"
   local marker="$LOGS_DIR/.specification.start"
+  stage_begin "specification"
   : > "$marker"
   log "stage specification (write permanent spec)"
-  {
-    echo "=== specification ==="
-    invoke_agent "specification" "specification-from-artifacts" 2>&1 \
-      || echo "[pipeline] specification exited non-zero"
-  } >> "$LOGS_DIR/specification.log" 2>&1
+  attempt_agent "specification" "specification-from-artifacts" "specification"
+  record_stage "specification" 1 "$LAST_RC"
 
   if find "$specs_dir" -type f \( -name 'INDEX.md' -o -name '*.md' \) -newer "$marker" 2>/dev/null | grep -q .; then
     log "specification ok — spec written under .claude/specs/"
@@ -242,17 +307,22 @@ main() {
   log "run $TRIGGER_ID — issue #$ISSUE_NUMBER ($TRIGGER_SOURCE)"
   setup_workspace
 
+  # 7.4: check_budget runs after every stage that has a successor.
   run_stage task-researcher "$SDD_DIR/research"      '*-research.md'
+  check_budget
   run_stage task-planner    "$SDD_DIR/plans"         '*-plan.instructions.md'
+  check_budget
 
   # 6.1 adversarial plan-challenge (best-effort), gated by ENABLE_PLAN_CHALLENGE.
   if [ "${ENABLE_PLAN_CHALLENGE:-true}" != "false" ]; then
     run_plan_challenge
+    check_budget
   else
     log "plan-challenge disabled (ENABLE_PLAN_CHALLENGE=false)"
   fi
 
   run_stage task-executor   "$SDD_DIR/changes"       '*-changes.md'
+  check_budget
   run_stage task-verifier   "$SDD_DIR/verification"  '*-verification.md'
 
   # 5.11 verify -> execute feedback loop.
@@ -260,8 +330,10 @@ main() {
   verdict="$(read_verdict)"
   while [ "$verdict" = FAIL ] && [ "$tries" -lt "$MAX_VERIFY_RETRIES" ]; do
     tries=$((tries + 1))
+    check_budget
     log "verdict FAIL — re-execute ($tries/$MAX_VERIFY_RETRIES)"
     run_stage task-executor  "$SDD_DIR/changes"      '*-changes.md'
+    check_budget
     run_stage task-verifier  "$SDD_DIR/verification" '*-verification.md'
     verdict="$(read_verdict)"
   done
@@ -271,6 +343,7 @@ main() {
   # 6.3 specification stage — only on PASS, best-effort (never sinks a verified
   # run). The core-stage hard-fails above already aborted on real failures.
   if [ "$verdict" = PASS ]; then
+    check_budget
     run_specification
   else
     log "verdict FAIL — skipping specification stage"

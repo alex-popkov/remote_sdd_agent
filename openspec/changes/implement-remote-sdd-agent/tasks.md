@@ -91,14 +91,14 @@ The old prompt-based challenge stages (`challenge-spec`, `challenge-design`) and
 
 ## 7. M7 — Observability & safety
 
-- [ ] 7.1 Implement `worker/src/runJson.ts`: helpers `init(runDir, trigger)`, `appendStage(runDir, stageRecord)`, `finalize(runDir, status, failureReason?)`, all using atomic write-then-rename to avoid partial reads
-- [ ] 7.2 Maintain a `MODEL_PRICING` table in `worker/src/pricing.ts` keyed by model id with `inputUsdPerMtok` and `outputUsdPerMtok`; add Sonnet 4.6 / Opus 4.7 / Haiku 4.5 rates
-- [ ] 7.3 Parse token usage from `claude -p` output (confirm structured output mode or stderr format against the installed CLI); compute `costUsd` per stage; append a stage record to `run.json` after each stage
-- [ ] 7.4 In `pipeline.sh`, between stages, read `run.json.totalCostUsd`, compare to `MAX_COST_USD`; if exceeded, exit 42
-- [ ] 7.5 In the worker, treat pipeline exit code 42 specially: set `run.json.status = "aborted-cost"`, populate `failureReason` with the breakdown, post a cost-summary comment on the source issue, move the task to `failed/`
-- [ ] 7.6 Add `receiver/src/dedupe.ts` backed by `better-sqlite3` at `workspace/state/deliveries.db` (schema: `deliveries(delivery_id TEXT PRIMARY KEY, seen_at INTEGER)`); on each authenticated request: `INSERT OR IGNORE`; if it was a duplicate, respond `200 { "status": "duplicate" }`
-- [ ] 7.7 On each insert, opportunistically `DELETE FROM deliveries WHERE seen_at < strftime('%s','now') - 86400`
-- [ ] 7.8 Add tests: cost ceiling abort, replay dedupe (first call enqueues, second returns duplicate, third after 24h fake-clock advance enqueues again)
+- [x] 7.1 Implement `worker/src/runJson.ts`: helpers `init(runDir, trigger)`, `appendStage(runDir, stageRecord)`, `finalize(runDir, status, failureReason?)`, all using atomic write-then-rename to avoid partial reads
+- [x] 7.2 Maintain a `MODEL_PRICING` table in `worker/src/pricing.ts` keyed by model id with `inputUsdPerMtok` and `outputUsdPerMtok`; add Sonnet 4.6 / Opus 4.7 / Haiku 4.5 rates — done, plus the current Claude 5 family (the agents' `opus`/`sonnet` aliases resolve there), a `cacheReadUsdPerMtok` column, cache writes at the 1h rate (2x input), longest-prefix id matching, and unknown ids priced at the highest rate
+- [x] 7.3 Parse token usage from `claude -p` output (confirm structured output mode or stderr format against the installed CLI); compute `costUsd` per stage; append a stage record to `run.json` after each stage — confirmed: `claude -p --output-format json` prints a result object whose `modelUsage` gives per-model input/output/cache-read/cache-write tokens; `pipeline.sh` saves one per attempt to `logs/usage/` and calls the compiled `worker/src/recordStage.ts` (`RECORD_STAGE_JS`). Local pricing matches the CLI's own `total_cost_usd` on a real call
+- [x] 7.4 In `pipeline.sh`, between stages, read `run.json.totalCostUsd`, compare to `MAX_COST_USD`; if exceeded, exit 42
+- [x] 7.5 In the worker, treat pipeline exit code 42 specially: set `run.json.status = "aborted-cost"`, populate `failureReason` with the breakdown, post a cost-summary comment on the source issue, move the task to `failed/`
+- [x] 7.6 Add `receiver/src/dedupe.ts` backed by `better-sqlite3` at `workspace/state/deliveries.db` (schema: `deliveries(delivery_id TEXT PRIMARY KEY, seen_at INTEGER)`); on each authenticated request: `INSERT OR IGNORE`; if it was a duplicate, respond `200 { "status": "duplicate" }`
+- [x] 7.7 On each insert, opportunistically `DELETE FROM deliveries WHERE seen_at < strftime('%s','now') - 86400` — implemented with an injected clock (`seen_at < ?`) so tests can advance time; a delivery whose enqueue fails is forgotten so GitHub's redelivery (same id) still goes through
+- [x] 7.8 Add tests: cost ceiling abort, replay dedupe (first call enqueues, second returns duplicate, third after 24h fake-clock advance enqueues again)
 - [ ] 7.9 **Acceptance**: setting `MAX_COST_USD=0.01` aborts a real run mid-pipeline with an issue comment; replaying a captured delivery returns the duplicate response; `run.json` for a green run contains per-stage `inputTokens`, `outputTokens`, `costUsd`, `durationMs`, `exitCode`
 
 ## 8. M8 — Polish

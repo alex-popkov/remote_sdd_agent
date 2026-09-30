@@ -1,8 +1,9 @@
 import { loadConfig } from './config';
 import { claimNext, ensureQueueDirs, moveToDone, moveToFailed, type Claim } from './queue';
-import { prepareRunWorkspace, finalizeRunJson } from './runWorkspace';
+import { prepareRunWorkspace, finalizeRunJson, readRunJson, type RunDirs } from './runWorkspace';
 import { cloneRepo, createBranch, hasChanges } from './gitOps';
-import { runPipeline, readPipelineOutcome } from './pipeline';
+import { runPipeline, readPipelineOutcome, COST_ABORT_EXIT_CODE } from './pipeline';
+import { costAbortComment, costAbortReason, pipelineFailureReason } from './costReport';
 import { createPr } from './prCreate';
 import { commentOnIssue } from './notify';
 
@@ -30,10 +31,37 @@ function now(): string {
   return new Date().toISOString();
 }
 
+/** run.json as the pipeline left it, or null if it can't be read. */
+function tryReadRunJson(dirs: RunDirs) {
+  try {
+    return readRunJson(dirs);
+  } catch {
+    return null;
+  }
+}
+
 /**
- * M5 processor: prepare workspace → clone → branch → run the agent SDD
+ * Pipeline exit 42: the MAX_COST_USD kill-switch fired between stages. Record
+ * status aborted-cost with the per-stage breakdown, tell the issue why nothing
+ * was opened, and fail the task. No PR is created.
+ */
+async function handleCostAbort(dirs: RunDirs, trigger: Claim['payload']): Promise<'failed'> {
+  const meta = readRunJson(dirs);
+  const reason = costAbortReason(meta, config.maxCostUsd);
+  console.warn(`[worker] ${trigger.triggerId} aborted: ${reason}`);
+  finalizeRunJson(dirs, { status: 'aborted-cost', failureReason: reason }, now());
+  try {
+    await commentOnIssue(trigger, costAbortComment(meta, config.maxCostUsd), config.githubToken);
+  } catch (err) {
+    console.error(`[worker] cost-abort comment failed (non-fatal):`, err);
+  }
+  return 'failed';
+}
+
+/**
+ * Processor: prepare workspace → clone → branch → run the agent SDD
  * pipeline → (non-empty diff) → open PR (draft on a FAIL verdict) + comment
- * back. Finalizes run.json on every exit path and returns the queue
+ * back; a cost-aborted pipeline (exit 42) skips the PR. Finalizes run.json on every exit path and returns the queue
  * disposition; thrown errors are also recorded in run.json before propagating.
  */
 async function processTask(claim: Claim): Promise<'done' | 'failed'> {
@@ -50,8 +78,11 @@ async function processTask(claim: Claim): Promise<'done' | 'failed'> {
     console.log(`[worker] cloned + checked out ${branch}`);
 
     const code = await runPipeline(dirs, trigger, config);
+    if (code === COST_ABORT_EXIT_CODE) {
+      return await handleCostAbort(dirs, trigger);
+    }
     if (code !== 0) {
-      throw new Error(`pipeline exited ${code} (see logs/pipeline.log)`);
+      throw new Error(pipelineFailureReason(tryReadRunJson(dirs), code));
     }
 
     // Empty-diff guard: nothing changed → fail the run, skip PR creation.

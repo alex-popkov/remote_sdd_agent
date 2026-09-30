@@ -12,7 +12,12 @@ COPY shared/ ./shared/
 # Install deps before copying source so npm-install is cached separately.
 COPY receiver/package.json receiver/package-lock.json* ./receiver/
 WORKDIR /app/receiver
-RUN npm install --omit=dev
+# better-sqlite3 (delivery dedupe) is a native module: it normally pulls a
+# prebuilt musl binary, but keep a toolchain around for the source-build
+# fallback, then drop it to keep the image small.
+RUN apk add --no-cache --virtual .build-deps python3 make g++ \
+    && npm install --omit=dev \
+    && apk del .build-deps
 
 COPY receiver/tsconfig.json ./
 COPY receiver/src ./src
