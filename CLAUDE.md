@@ -41,7 +41,7 @@ For a single-developer MVP: simpler, debuggable with `ls`, survives restarts, an
 | Event | Action | Condition | Source |
 |---|---|---|---|
 | `issues` | `labeled` | label == `TRIGGER_LABEL` (default `agent:run`) | `label` |
-| `issue_comment` | `created` | body mentions `@<BOT_MENTION>` | `mention` |
+| `issue_comment` | `created` | body mentions `@<BOT_MENTION>` and author is `OWNER`/`MEMBER`/`COLLABORATOR` | `mention` |
 | `issues` | `labeled` | label == `status:ready-for-dev` | `status` |
 
 GitHub Projects v2 status changes are sidestepped via the label convention — their webhook payload requires extra GraphQL queries.

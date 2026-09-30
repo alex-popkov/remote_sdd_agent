@@ -12,7 +12,7 @@ export interface WebhookPayload {
     html_url: string;
     user: { login: string };
   };
-  comment?: { body: string; user: { login: string } };
+  comment?: { body: string; user: { login: string }; author_association?: string };
   label?: { name: string };
   repository?: {
     name: string;
@@ -21,6 +21,15 @@ export interface WebhookPayload {
   };
   sender?: { login: string };
 }
+
+/**
+ * Comment authors allowed to fire the mention trigger. On a public repo anyone
+ * can comment, so without this check any GitHub user could start a run (spending
+ * API credit) and feed a prompt injection to an agent that holds the repo token.
+ * The label triggers need no equivalent: adding a label already requires
+ * triage/write access.
+ */
+const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 export interface TriggerMapConfig {
   triggerLabel: string;
@@ -85,7 +94,11 @@ export function statusTrigger(
   return base && { ...base, source: 'status' };
 }
 
-/** Map an issue_comment.created event whose body mentions @<BOT_MENTION> to a mention-source trigger. */
+/**
+ * Map an issue_comment.created event whose body mentions @<BOT_MENTION> to a
+ * mention-source trigger. Only comments from trusted authors count (see
+ * TRUSTED_ASSOCIATIONS).
+ */
 export function mentionTrigger(
   eventType: string,
   payload: WebhookPayload,
@@ -94,6 +107,7 @@ export function mentionTrigger(
   if (eventType !== 'issue_comment' || payload.action !== 'created') return null;
   const body = payload.comment?.body ?? '';
   if (!body.includes(`@${cfg.botMention}`)) return null;
+  if (!TRUSTED_ASSOCIATIONS.has(payload.comment?.author_association ?? '')) return null;
   const base = baseFromPayload(payload, eventType);
   return base && { ...base, source: 'mention' };
 }
