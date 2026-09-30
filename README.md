@@ -1,53 +1,90 @@
 # remote-sdd-agent
 
-A self-hosted remote coding agent: GitHub Issue → SDD pipeline → Pull Request.
-Code never leaves your machine — the agent only talks to GitHub + Anthropic.
+A self-hosted coding agent that turns **GitHub Issues into Pull Requests**
+with no human in the loop. Label an issue, and a few minutes later a PR with
+the implementation, a written plan, and a verification report is waiting for
+review.
 
-The architecture, contracts, and security model are documented in
-[`spec.md`](./spec.md). Active implementation work lives under
-[`openspec/changes/implement-remote-sdd-agent/`](./openspec/changes/implement-remote-sdd-agent/).
+It runs on your own machine with `docker compose`. Your code is cloned and
+worked on locally and never leaves your infrastructure: the agent only talks
+to the GitHub API (clone, push, PR, comment) and the Anthropic API (the model).
 
-## Status
+## How it works
 
-Milestones M1–M8 are implemented. The webhook receiver, file queue and worker
-are wired end-to-end, and the worker runs the full agent-based SDD pipeline to
-turn a labeled issue into a PR:
+Rather than one big "fix this issue" prompt, the agent follows
+**Spec-Driven Development (SDD)**. The work is split into small stages, and
+each one runs as a **fresh Claude session** with its own focused agent. Stages
+don't share conversation state; each reads the previous stage's files on disk
+and writes its own.
 
 ```
 task-researcher → task-planner → plan-challenge → task-executor → task-verifier → specification
                                   (optional)            ↑── verify loop ──┘        (on PASS)
 ```
 
-Each stage is a fresh `claude -p --agent <name>` session driven by a
-stack-agnostic agent in [`pipeline/agents/`](./pipeline/agents/). A `FAIL`
-verdict re-runs the executor (`MAX_VERIFY_RETRIES`) and, if it still fails,
-opens the PR as a **draft**. A `PASS` also commits a permanent spec under
-`.claude/specs/` in the target repo. Every run records per-stage tokens and
-cost in `run.json`, and the `MAX_COST_USD` kill-switch stops runaway runs.
+| Stage | What it does | Output |
+|---|---|---|
+| **task-researcher** | Studies the issue and the codebase: stack, conventions, relevant files | research notes |
+| **task-planner** | Writes a step-by-step implementation plan | plan + details + implementation prompt |
+| **plan-challenge** | A second planner session attacks the plan (gaps, edge cases, risky assumptions) and revises it in place | revised plan |
+| **task-executor** | Implements the plan in the repo | code changes + changes log |
+| **task-verifier** | Independently checks the result against the plan and the issue, and runs the repo's own build/lint/tests | `VERDICT: PASS` or `FAIL` |
+| **specification** | On `PASS`, distills a permanent spec that is committed with the PR | `.claude/specs/…` |
+
+On a `FAIL` verdict the executor gets another try using the verifier's
+findings. If it still fails, the PR is opened as a **draft** so a human can
+take over. The agents are **stack-agnostic**: they work out the language,
+tools, and test commands from the target repo and its `CLAUDE.md`. They live
+as plain markdown in [`pipeline/agents/`](./pipeline/agents/).
+
+Every PR description includes the plan, the changes, the spec, and the
+verification report. Every run records per-stage tokens and cost, and a
+per-run budget (`MAX_COST_USD`, default $5) stops runaway runs.
+
+### Triggers
+
+| You do this on an issue in an allowed repo | Config |
+|---|---|
+| Add the label `agent:run` | `TRIGGER_LABEL` |
+| Add the label `status:ready-for-dev` | fixed |
+| Post a comment mentioning `@remote-agent` | `BOT_MENTION` |
+
+Events from repos outside `ALLOWED_REPOS`, events with a bad signature, and
+events sent by bots (including the agent itself) are ignored.
+
+## Quick start
+
+For those who've done it before. The full walkthrough follows below.
+
+```bash
+cp .env.example .env               # fill in the 4 required values (step 2)
+docker compose up --build -d       # start receiver (:3000) + worker
+ngrok http 3000                    # expose the receiver; add the repo webhook (step 3)
+# → add the `agent:run` label to an issue in an ALLOWED_REPOS repo
+docker compose logs -f worker      # watch it work
+```
 
 ## Prerequisites
 
-Install these before you start:
+- **Docker** with Compose v2 (`docker compose version`) runs both containers.
+  Nothing else needs to be installed on the host to run the app.
+- **A GitHub repo** you can add a webhook to and label issues on.
+- **An Anthropic API key** for the worker's `claude` CLI.
+- **`openssl`** to generate the webhook secret (preinstalled on macOS/Linux).
+- **A tunnel** (`ngrok` or `cloudflared`) so GitHub can reach the receiver on
+  your machine. You don't need it for the local smoke test.
+- *Optional, for development:* Node 20+ to run the test suite.
 
-- **Docker** with Compose v2 (`docker compose version`) — runs both containers.
-- **A GitHub account** with admin access to a test repo you can label issues on.
-- **An Anthropic API key** — used by the worker's `claude` CLI to run the pipeline.
-- **`openssl`** — to generate the webhook secret (preinstalled on macOS/Linux).
-- **A tunneling tool** (`ngrok` or `cloudflared`) — to expose your local
-  receiver to GitHub. Only needed for the real end-to-end run, not the smoke test.
+## Run it: step by step
 
-## Run it — step by step from a clean clone
+### 1. Create a GitHub token
 
-### 1. Create a GitHub token (App, fine-grained PAT, or classic PAT)
+`GITHUB_TOKEN` is used for everything the worker does on GitHub: clone and
+push the agent's branch, read the issue, open the PR (a draft on a `FAIL`
+verdict), and comment on the issue. Give it only the repos in
+`ALLOWED_REPOS` (`spec.md §7`).
 
-`GITHUB_TOKEN` authenticates every GitHub operation the worker performs:
-`git clone` + push the agent's branch, `gh pr create` (including draft PRs on a
-`FAIL` verdict), reading the issue body/labels, and `gh issue comment` to post
-the PR URL back. Grant the **minimum** that covers those — per `spec.md §7`,
-the token should be scoped to the `ALLOWED_REPOS` and unable to read anything
-else. Pick one of the three options below.
-
-#### Option A — Fine-grained PAT (simplest, recommended for local use)
+#### Option A: fine-grained PAT (recommended for local use)
 
 Go to <https://github.com/settings/tokens?type=beta>. Under **Repository
 access**, choose **Only select repositories** and pick exactly the repos in
@@ -55,118 +92,160 @@ access**, choose **Only select repositories** and pick exactly the repos in
 
 | Permission | Level | Why |
 |---|---|---|
-| **Contents** | Read & write | clone + push the feature branch |
-| **Pull requests** | Read & write | `gh pr create` (normal + draft PRs) |
-| **Issues** | Read & write | read issue/labels, comment the PR URL back |
-| **Metadata** | Read | mandatory, auto-selected |
-| **Workflows** | Read & write | *only if* the agent may edit `.github/workflows/` — pushes touching workflow files are rejected without it |
+| **Contents** | Read & write | clone and push the feature branch |
+| **Pull requests** | Read & write | `gh pr create` (normal and draft PRs) |
+| **Issues** | Read & write | read the issue and labels, comment the PR URL back |
+| **Metadata** | Read | required, selected automatically |
+| **Workflows** | Read & write | *only if* the agent may edit `.github/workflows/`; pushes that touch workflow files are rejected without it |
 
-#### Option B — GitHub App (best for a long-lived org bot)
+#### Option B: GitHub App (best for a long-lived org bot)
 
 Go to <https://github.com/settings/apps/new>. Set the same **Repository
-permissions** as the table above, then subscribe to the **Issues** and
-**Issue comment** webhook events and install the App on your target repo(s).
-Use an installation token as `GITHUB_TOKEN`. An App is the cleanest fit for a
-persistent bot: installation tokens auto-expire, access is per-repo, and the
-App's `[bot]` sender login is filtered by the anti-loop guard (`spec.md §4.1`,
-rule #5).
+permissions** as the table above, subscribe to the **Issues** and **Issue
+comment** events, and install the App on your target repo(s). Use an
+installation token as `GITHUB_TOKEN`. Installation tokens expire on their own,
+access is per repo, and the App's `[bot]` login is ignored by the anti-loop
+guard (`spec.md §4.1`, rule #5).
 
-#### Option C — Classic PAT (coarse; avoid unless you must)
+#### Option C: classic PAT (avoid unless you must)
 
-Go to <https://github.com/settings/tokens/new> and select the **`repo`** scope
-(covers clone/push, PRs, and issue comments), plus **`workflow`** only if the
-agent may modify `.github/workflows/`. Note that classic `repo` grants access
-to **all** your repositories, which conflicts with the per-repo scoping above —
-prefer Option A or B.
+Go to <https://github.com/settings/tokens/new> and select the **`repo`** scope,
+plus **`workflow`** only if the agent may modify `.github/workflows/`. Classic
+`repo` grants access to **all** your repositories, so prefer Option A or B.
 
-> The webhook itself is verified with `GITHUB_WEBHOOK_SECRET` (HMAC), not the
-> token, so no admin/webhook permission is required on `GITHUB_TOKEN`.
+> The webhook is authenticated with `GITHUB_WEBHOOK_SECRET` (HMAC), not the
+> token, so `GITHUB_TOKEN` needs no admin or webhook permission.
 
-### 2. Copy `.env.example` to `.env` and fill required values
+### 2. Configure `.env`
 
 ```bash
 cp .env.example .env
-# Required:
-#   GITHUB_WEBHOOK_SECRET   (openssl rand -hex 32)
-#   GITHUB_TOKEN            (App installation token or PAT)
-#   ANTHROPIC_API_KEY       (only used by the worker pipeline)
-#   ALLOWED_REPOS           (comma-separated owner/name)
+openssl rand -hex 32    # paste the output as GITHUB_WEBHOOK_SECRET
 ```
 
-Every variable is documented inline in `.env.example`.
+Fill in the four required values:
 
-### 3. Start a public tunnel and point the GitHub App webhook at it
+| Variable | Value |
+|---|---|
+| `GITHUB_WEBHOOK_SECRET` | the random hex string from above (you'll paste it into GitHub in step 3) |
+| `GITHUB_TOKEN` | the token from step 1 |
+| `ANTHROPIC_API_KEY` | your Anthropic API key |
+| `ALLOWED_REPOS` | comma-separated `owner/name` list, e.g. `acme/widgets,acme/api` |
+
+The optional settings, with their defaults, are documented inline in
+`.env.example`. The ones you're most likely to change:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BASE_BRANCH` | repo default branch | branch to clone, work on, and open the PR against |
+| `TRIGGER_LABEL` | `agent:run` | label that starts a run |
+| `BOT_MENTION` | `remote-agent` | `@mention` that starts a run from a comment |
+| `MAX_COST_USD` | `5.00` | per-run spending cap |
+| `MAX_VERIFY_RETRIES` | `1` | executor re-runs after a `FAIL` verdict |
+| `ENABLE_PLAN_CHALLENGE` | `true` | run the adversarial plan-review stage |
+
+### 3. Expose the receiver and add the webhook
+
+GitHub has to reach the receiver on port 3000. Start a tunnel:
 
 ```bash
-# Pick one:
-ngrok http 3000
+ngrok http 3000                                   # or:
 cloudflared tunnel --url http://localhost:3000
 ```
 
-In the GitHub App settings:
+Then, on each repo in `ALLOWED_REPOS`, go to **Settings → Webhooks → Add
+webhook** (with a GitHub App, set the same values in the App settings):
 
-- **Webhook URL**: `https://<your-tunnel>/webhook`
-- **Webhook secret**: same value as `GITHUB_WEBHOOK_SECRET` in `.env`
+| Field | Value |
+|---|---|
+| **Payload URL** | `https://<your-tunnel>/webhook` |
+| **Content type** | **`application/json`** (the default, form-encoded, won't work) |
+| **Secret** | the same value as `GITHUB_WEBHOOK_SECRET` |
+| **Events** | *Let me select individual events* → **Issues** and **Issue comments** |
 
-### 4. Start the containers
+Also create the `agent:run` label in the repo (**Issues → Labels → New
+label**) so you can apply it. The agent creates its own `agent:created`
+label on its PRs.
+
+> Free tunnel URLs change on every restart. When yours does, update the
+> Payload URL.
+
+### 4. Start the app
 
 ```bash
 docker compose up --build
 ```
 
-You should see the receiver listening on `:3000` and the worker polling
-`/workspace/queue/pending`. Leave this running; open a second terminal for the
-verify step. To run detached instead, use `docker compose up --build -d` and
-follow logs with `docker compose logs -f`.
+This builds and starts two containers:
 
-> **Always pass `--build` after changing source.** The containers run compiled
-> code baked into the image, not the files on disk. `docker compose up -d`
-> alone — even with `--force-recreate` — reuses the existing image and silently
-> runs **stale code** (e.g. an old worker that prints `would run pipeline` and
-> marks tasks `done` without cloning or opening a PR). Editing `.env` does take
-> effect on plain recreate, but any change under `receiver/`, `worker/`, or
-> `shared/` requires a rebuild: `docker compose up -d --build`.
+- **receiver**: listens on `:3000`, checks and filters webhooks, and queues tasks.
+- **worker**: picks up queued tasks, runs the pipeline, and opens the PR.
 
-### 5. Verify end-to-end
+Check that it's up:
 
-Add the `agent:run` label (or whatever `TRIGGER_LABEL` is set to) to any
-issue on a whitelisted repo, **or** post a comment containing
-`@<BOT_MENTION>`. Watch the worker logs:
-
-```
-[worker] claimed acme__widgets__42__1717000000000.json
+```bash
+curl localhost:3000/health          # → {"status":"ok"}
 ```
 
-A run takes roughly 5–30 minutes. The worker clones the repo, runs the
-pipeline, opens a PR against the issue, and posts a comment on the issue with
-the PR URL. Progress per stage is in `workspace/runs/<triggerId>/logs/`
-(`pipeline.log` plus one `<stage>.log` each), and cost so far in
-`workspace/runs/<triggerId>/run.json`.
+To run in the background instead, use `docker compose up --build -d` and
+follow the logs with `docker compose logs -f`.
 
-### Fast path: smoke test without GitHub
+> **Always pass `--build` after changing code.** The containers run code
+> compiled into the image, so `docker compose up` without `--build` keeps
+> running the **old** receiver/worker. Edits to `.env` apply after a plain
+> restart. Edits to `pipeline/` (agents and `pipeline.sh`) apply immediately,
+> because that directory is mounted into the worker.
 
-To exercise the receiver → queue → worker pipe with no GitHub App or tunnel,
-run (with `docker compose up` already running and `.env` populated):
+### 5. Trigger a run
+
+Add the `agent:run` label to an issue in an allowed repo, or comment
+`@remote-agent please take this`. In GitHub's webhook settings, **Recent
+Deliveries** should show a `202` response, and the worker log shows:
+
+```
+[worker] claimed acme__widgets__42__1717000000000
+```
+
+A run takes about 5–30 minutes. When it finishes, the issue gets a comment
+linking the new PR. To follow along:
+
+```bash
+docker compose logs -f worker
+ls workspace/runs/                                  # one directory per run
+tail -f workspace/runs/<triggerId>/logs/pipeline.log
+jq '.status, .totalCostUsd' workspace/runs/<triggerId>/run.json
+```
+
+Each run directory contains the cloned `repo/`, the stage artifacts in
+`artifacts/`, one log per stage in `logs/`, and `run.json` with per-stage
+timings, tokens, and cost.
+
+### Try it without GitHub: smoke test
+
+To test the receiver → queue → worker path without a tunnel or a webhook
+(with the containers running and `.env` filled in):
 
 ```bash
 bash scripts/smoke-test.sh
 ```
 
-It signs local payloads with your webhook secret and checks the receiver's
-response codes (202/204/401) and that a queue file appears in `pending/`.
+It sends signed test payloads to the receiver and checks the responses
+(202/204/401) and that a task file appears in the queue. The token and API key
+can be placeholders for this test.
 
-Unit and integration tests (no Docker, no API calls — the pipeline tests use a
-fake `claude`):
+### Run the tests
+
+No Docker and no API calls: the pipeline tests use a fake `claude`.
 
 ```bash
 npm install && npm test
 ```
 
-### Stopping and resetting
+### Stop and reset
 
 ```bash
-docker compose down            # stop both containers
-rm -rf workspace/queue/* workspace/runs/*   # clear queue + run dirs (optional)
+docker compose down                          # stop both containers
+rm -rf workspace/queue/*/*.json workspace/runs/*   # optional: clear the queue and old runs
 ```
 
 ## Architecture (one paragraph)
@@ -191,7 +270,7 @@ model, and milestone breakdown.
 ├── docker-compose.yml
 ├── .env.example
 ├── receiver/        Express + HMAC verify + filters + enqueue
-├── worker/          Poll loop, claim, (M4+) clone + run pipeline
+├── worker/          Poll loop, claim, clone, run pipeline, open PR
 ├── shared/          Shared TypeScript types (TaskTrigger, Context, RunMetadata)
 ├── pipeline/        pipeline.sh + stack-agnostic agents (pipeline/agents/*.md)
 ├── docs/            agent-tuning.md
