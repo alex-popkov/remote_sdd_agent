@@ -47,7 +47,7 @@ per-run budget (`MAX_COST_USD`, default $5) stops runaway runs.
 |---|---|
 | Add the label `agent:run` | `TRIGGER_LABEL` |
 | Add the label `status:ready-for-dev` | fixed |
-| Post a comment mentioning `@remote-agent` | `BOT_MENTION` |
+| Post a comment mentioning `@remote-agent` (repo owner, org members and collaborators only) | `BOT_MENTION` |
 
 Events from repos outside `ALLOWED_REPOS`, events with a bad signature, and
 events sent by bots (including the agent itself) are ignored.

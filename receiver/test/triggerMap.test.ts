@@ -68,12 +68,31 @@ describe('mentionTrigger', () => {
   it('returns a mention-source trigger when the comment body mentions @bot', () => {
     const p = payload({
       action: 'created',
-      comment: { body: 'hey @remote-agent please look', user: { login: 'alice' } },
+      comment: { body: 'hey @remote-agent please look', user: { login: 'alice' }, author_association: 'OWNER' },
     });
     const t = mentionTrigger('issue_comment', p, CFG);
     expect(t).not.toBeNull();
     expect(t!.source).toBe('mention');
   });
+
+  it.each(['OWNER', 'MEMBER', 'COLLABORATOR'])('accepts a mention from a %s', (assoc) => {
+    const p = payload({
+      action: 'created',
+      comment: { body: '@remote-agent go', user: { login: 'alice' }, author_association: assoc },
+    });
+    expect(mentionTrigger('issue_comment', p, CFG)?.source).toBe('mention');
+  });
+
+  it.each(['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE', undefined])(
+    'ignores a mention from an untrusted author (%s)',
+    (assoc) => {
+      const p = payload({
+        action: 'created',
+        comment: { body: '@remote-agent go', user: { login: 'mallory' }, author_association: assoc },
+      });
+      expect(mentionTrigger('issue_comment', p, CFG)).toBeNull();
+    },
+  );
 
   it('returns null when the comment does not mention the bot', () => {
     const p = payload({
