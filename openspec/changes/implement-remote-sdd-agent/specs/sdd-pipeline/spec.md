@@ -162,6 +162,11 @@ After `task-executor`, the `task-verifier` stage SHALL independently check the i
 - **WHEN** `task-verifier` returns `VERDICT: FAIL` and `MAX_VERIFY_RETRIES` is 1
 - **THEN** `task-executor` runs once more with the verification report, `task-verifier` runs again, and the second verdict is final
 
+#### Scenario: Re-execution may leave the changes file untouched
+
+- **WHEN** the re-run `task-executor` exits 0 without writing a new `*-changes.md` (it fixed the findings in place, or found nothing left to do)
+- **THEN** the re-execution counts as successful and `task-verifier` runs again; only a non-zero exit is retried against `MAX_STAGE_RETRIES`
+
 #### Scenario: Persistent failure is carried forward, not hidden
 
 - **WHEN** the verdict is still `FAIL` after `MAX_VERIFY_RETRIES` re-executions

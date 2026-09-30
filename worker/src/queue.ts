@@ -69,6 +69,10 @@ export function claimNext(workspaceDir: string): Claim | null {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw err;
     }
+    // rename() keeps the enqueue-time mtime; stamp the claim time so startup
+    // recovery (recovery.ts) measures staleness from the claim.
+    const claimedAt = new Date();
+    fs.utimesSync(to, claimedAt, claimedAt);
     const raw = fs.readFileSync(to, 'utf-8');
     const payload = JSON.parse(raw) as TaskTrigger;
     return { triggerId: payload.triggerId, payload };

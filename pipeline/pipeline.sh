@@ -235,6 +235,45 @@ run_stage() {
   return 1
 }
 
+# --- 5.15 verify-loop re-execute ---------------------------------------------
+
+# run_reexecute: task-executor on a FAIL verdict. A *-changes.md already exists
+# from the first pass, and the executor may fix the findings without rewriting
+# it (or find nothing left to do), so a clean exit counts as success even when
+# no fresh changes file appears — the same no-op rule as plan-challenge (6.2).
+# Only a non-zero exit is retried; exhausting MAX_STAGE_RETRIES hard-fails.
+run_reexecute() {
+  local stage="task-executor" dir="$SDD_DIR/changes" pattern='*-changes.md'
+  local marker="$LOGS_DIR/.$stage.start"
+  local attempt=1
+  stage_begin "$stage"
+
+  while [ "$attempt" -le "$MAX_STAGE_RETRIES" ]; do
+    log "stage $stage re-execute (attempt $attempt/$MAX_STAGE_RETRIES)"
+    : > "$marker"
+    attempt_agent "$stage" "$stage" "$stage re-execute attempt $attempt"
+
+    if find "$dir" -type f -name "$pattern" -newer "$marker" 2>/dev/null | grep -q .; then
+      rm -f "$marker"
+      log "stage $stage ok — changes updated"
+      record_stage "$stage" "$attempt" 0
+      return 0
+    fi
+    if [ "$LAST_RC" -eq 0 ]; then
+      rm -f "$marker"
+      log "stage $stage ok — no new changes file, proceeding to verify"
+      record_stage "$stage" "$attempt" 0
+      return 0
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  rm -f "$marker"
+  log "stage $stage FAILED: re-execute exited $LAST_RC after $MAX_STAGE_RETRIES attempts"
+  record_stage "$stage" "$MAX_STAGE_RETRIES" "$LAST_RC"
+  return 1
+}
+
 # --- 6.2 plan-challenge: best-effort in-place plan revision -------------------
 
 # Single attempt, never fails the run: an adversarial task-planner session that
@@ -332,7 +371,7 @@ main() {
     tries=$((tries + 1))
     check_budget
     log "verdict FAIL — re-execute ($tries/$MAX_VERIFY_RETRIES)"
-    run_stage task-executor  "$SDD_DIR/changes"      '*-changes.md'
+    run_reexecute
     check_budget
     run_stage task-verifier  "$SDD_DIR/verification" '*-verification.md'
     verdict="$(read_verdict)"
@@ -352,4 +391,9 @@ main() {
   return 0
 }
 
-main "$@"
+# Sourcing the script (instead of executing it) defines the stage functions
+# without running the pipeline, so one stage can be re-run in isolation — see
+# docs/agent-tuning.md.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

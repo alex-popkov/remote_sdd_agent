@@ -9,11 +9,21 @@ The architecture, contracts, and security model are documented in
 
 ## Status
 
-Webhook receiver + file queue + worker are wired end-to-end, and the worker
-runs the agent-based SDD pipeline (`task-researcher → task-planner →
-task-executor → task-verifier`) to turn a labeled issue into a PR. Remaining
-milestones (M6–M8) add the plan-challenge + specification stages,
-observability, and the cost kill-switch.
+Milestones M1–M8 are implemented. The webhook receiver, file queue and worker
+are wired end-to-end, and the worker runs the full agent-based SDD pipeline to
+turn a labeled issue into a PR:
+
+```
+task-researcher → task-planner → plan-challenge → task-executor → task-verifier → specification
+                                  (optional)            ↑── verify loop ──┘        (on PASS)
+```
+
+Each stage is a fresh `claude -p --agent <name>` session driven by a
+stack-agnostic agent in [`pipeline/agents/`](./pipeline/agents/). A `FAIL`
+verdict re-runs the executor (`MAX_VERIFY_RETRIES`) and, if it still fails,
+opens the PR as a **draft**. A `PASS` also commits a permanent spec under
+`.claude/specs/` in the target repo. Every run records per-stage tokens and
+cost in `run.json`, and the `MAX_COST_USD` kill-switch stops runaway runs.
 
 ## Prerequisites
 
@@ -127,8 +137,11 @@ issue on a whitelisted repo, **or** post a comment containing
 [worker] claimed acme__widgets__42__1717000000000.json
 ```
 
-Within ~5 minutes the worker clones the repo, runs the pipeline, opens a PR
-against the issue, and posts a comment on the issue with the PR URL.
+A run takes roughly 5–30 minutes. The worker clones the repo, runs the
+pipeline, opens a PR against the issue, and posts a comment on the issue with
+the PR URL. Progress per stage is in `workspace/runs/<triggerId>/logs/`
+(`pipeline.log` plus one `<stage>.log` each), and cost so far in
+`workspace/runs/<triggerId>/run.json`.
 
 ### Fast path: smoke test without GitHub
 
@@ -141,6 +154,13 @@ bash scripts/smoke-test.sh
 
 It signs local payloads with your webhook secret and checks the receiver's
 response codes (202/204/401) and that a queue file appears in `pending/`.
+
+Unit and integration tests (no Docker, no API calls — the pipeline tests use a
+fake `claude`):
+
+```bash
+npm install && npm test
+```
 
 ### Stopping and resetting
 
@@ -155,7 +175,7 @@ rm -rf workspace/queue/* workspace/runs/*   # clear queue + run dirs (optional)
 GitHub  ──webhook──►  receiver  ──file──►  workspace/queue/pending  ──poll──►  worker
                                                                                   │
                                                                                   ▼
-                                                                       pipeline.sh (M5+)
+                                                                       pipeline.sh → PR
 ```
 
 Two containers, one shared `/workspace` volume. Receiver ACKs in <100ms;
@@ -173,20 +193,70 @@ model, and milestone breakdown.
 ├── receiver/        Express + HMAC verify + filters + enqueue
 ├── worker/          Poll loop, claim, (M4+) clone + run pipeline
 ├── shared/          Shared TypeScript types (TaskTrigger, Context, RunMetadata)
-├── pipeline/        bash + prompts (M5+)
+├── pipeline/        pipeline.sh + stack-agnostic agents (pipeline/agents/*.md)
+├── docs/            agent-tuning.md
 ├── scripts/         smoke-test.sh
 ├── openspec/        Active change proposals and per-capability specs
 └── workspace/
     ├── queue/       pending / processing / done / failed
     ├── runs/        Per-task working directories
-    └── state/       Receiver dedupe DB (M7+)
+    └── state/       Receiver delivery-dedupe DB (deliveries.db)
 ```
+
+## Cost kill-switch
+
+`MAX_COST_USD` (default `5.00`) caps what one run may spend. After each stage
+the pipeline prices the stage's token usage (from `claude -p --output-format
+json`, using the table in `worker/src/pricing.ts`) and adds it to
+`run.json.totalCostUsd`. Between stages, once the total reaches the ceiling the
+pipeline exits with code 42 and the worker:
+
+- sets `run.json.status = "aborted-cost"` with a per-stage breakdown in
+  `failureReason`,
+- posts that breakdown as a comment on the source issue,
+- opens no PR and moves the task to `workspace/queue/failed/`.
+
+A check only happens *between* stages, so a run can overshoot the ceiling by at
+most one stage's cost. A typical green run costs a few dollars; see
+[`docs/agent-tuning.md`](./docs/agent-tuning.md) for how to read per-stage
+cost and cut it.
 
 ## Recovering a failed run
 
-A failed task lands in `workspace/queue/failed/<triggerId>.json` and its
-run directory `workspace/runs/<triggerId>/` is preserved for postmortem.
-To retry, move the file back to `workspace/queue/pending/`. The cost
-kill-switch (`MAX_COST_USD`, default $5/run) trips between pipeline
-stages — runs aborted that way land in `failed/` with `run.json.status =
-"aborted-cost"`.
+A failed task lands in `workspace/queue/failed/<triggerId>.json` and its run
+directory `workspace/runs/<triggerId>/` is preserved for postmortem: start with
+`run.json` (`status`, `failureReason`) and `logs/pipeline.log`, then the
+failing stage's `logs/<stage>.log`.
+
+`status` tells you what happened:
+
+| `status` | Meaning | What to do |
+|---|---|---|
+| `failed` | A core stage produced no artifact after `MAX_STAGE_RETRIES`, the diff was empty, or `git`/`gh` failed | Fix the cause, then retry |
+| `aborted-cost` | The run hit `MAX_COST_USD` | Raise the ceiling in `.env` or tune the costly stage, then retry |
+
+To retry, move the task file back to the queue. The run directory is keyed by
+the trigger id, so move the old one aside first — the worker clones into a
+fresh `repo/`:
+
+```bash
+ID=<triggerId>
+mv workspace/runs/$ID workspace/runs/$ID.failed-$(date +%s)
+mv workspace/queue/failed/$ID.json workspace/queue/pending/
+```
+
+Or simply re-trigger the issue (re-add the label or mention the bot) — that
+creates a new trigger id and a new branch/PR.
+
+**Crashed worker.** If the worker dies mid-run, its task is stuck in
+`workspace/queue/processing/`. On the next start the worker moves any
+`processing/` file claimed more than 1 hour ago back to `pending/`, marks the
+abandoned run `failed` and renames its directory to
+`runs/<triggerId>.abandoned-<unixMs>`, then re-runs the task from scratch.
+
+## Further reading
+
+- [`spec.md`](./spec.md) — architecture, data contracts, security model, milestones.
+- [`openspec/changes/implement-remote-sdd-agent/`](./openspec/changes/implement-remote-sdd-agent/) — the implementation change: proposal, design decisions, per-capability specs, task list.
+- [`docs/agent-tuning.md`](./docs/agent-tuning.md) — editing agents, re-running one stage, inspecting cost.
+- [`pipeline/agents/readme.md`](./pipeline/agents/readme.md) — what each agent does.

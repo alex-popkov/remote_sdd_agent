@@ -6,9 +6,16 @@ import { runPipeline, readPipelineOutcome, COST_ABORT_EXIT_CODE } from './pipeli
 import { costAbortComment, costAbortReason, pipelineFailureReason } from './costReport';
 import { createPr } from './prCreate';
 import { commentOnIssue } from './notify';
+import { sweepStaleProcessing } from './recovery';
 
 const config = loadConfig();
 ensureQueueDirs(config.workspaceDir);
+
+// Crash recovery: requeue tasks a dead worker left in processing/ (>1h old)
+// before claiming anything new.
+for (const id of sweepStaleProcessing(config.workspaceDir)) {
+  console.log(`[worker] recovered stale task ${id} → pending/`);
+}
 
 let shuttingDown = false;
 process.on('SIGTERM', () => {

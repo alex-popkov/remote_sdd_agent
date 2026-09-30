@@ -125,6 +125,43 @@ describe('pipeline.sh cost accounting + kill-switch', () => {
     expect(log).toContain('"result":"done"');
   });
 
+  it('accepts a verify-loop re-execute that writes no new *-changes.md', () => {
+    // First verdict FAIL, second PASS; the executor writes its changes file on
+    // the first pass only (the re-execute fixes findings without rewriting it).
+    const noopReexecute = FAKE_CLAUDE
+      .replace(
+        'task-executor) echo c > "$sdd/changes/x-changes.md" ;;',
+        'task-executor) [ -f "$sdd/changes/x-changes.md" ] || echo c > "$sdd/changes/x-changes.md" ;;',
+      )
+      .replace(
+        `task-verifier) printf 'VERDICT: PASS\\n' > "$sdd/verification/x-verification.md" ;;`,
+        `task-verifier) if [ -f .verified-once ]; then v=PASS; else v=FAIL; touch .verified-once; fi
+    printf 'VERDICT: %s\\n' "$v" > "$sdd/verification/x-verification.md" ;;`,
+      );
+    expect(noopReexecute).toContain('.verified-once');
+    fs.writeFileSync(path.join(binDir, 'claude'), noopReexecute, { mode: 0o755 });
+    try {
+      const res = runPipeline(runDir, '100');
+      expect(res.status).toBe(0);
+      expect(res.stdout).toContain('no new changes file, proceeding to verify');
+      expect(res.stdout).toContain('final verdict: PASS');
+      const meta = runJson.read(runDir);
+      expect(meta.stages.map(s => s.name)).toEqual([
+        'task-researcher',
+        'task-planner',
+        'plan-challenge',
+        'task-executor',
+        'task-verifier',
+        'task-executor',
+        'task-verifier',
+        'specification',
+      ]);
+      expect(meta.stages[5]).toMatchObject({ attempts: 1, exitCode: 0 });
+    } finally {
+      fs.writeFileSync(path.join(binDir, 'claude'), FAKE_CLAUDE, { mode: 0o755 });
+    }
+  });
+
   it('records a hard-failed stage with a non-zero exit code', () => {
     // A claude that exits cleanly but never writes the researcher artifact.
     fs.writeFileSync(path.join(binDir, 'claude'), '#!/usr/bin/env bash\necho "{}"\n', { mode: 0o755 });
