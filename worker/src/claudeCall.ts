@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { run } from './exec';
+import { agentEnv, run } from './exec';
 import type { TaskTrigger } from '../../shared/src/types';
 
 /**
@@ -25,7 +25,7 @@ export async function naive(
     ['-p', prompt, '--permission-mode', 'bypassPermissions'],
     {
       cwd: repoDir,
-      env: { ...process.env, ANTHROPIC_API_KEY: anthropicApiKey },
+      env: { ...agentEnv(), ANTHROPIC_API_KEY: anthropicApiKey },
       logFile,
     },
   );

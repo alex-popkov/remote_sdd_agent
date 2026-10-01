@@ -25,12 +25,12 @@ After claiming task `<triggerId>`, the worker SHALL create the directory tree `w
 
 ### Requirement: Clone target repository on a fresh branch
 
-The worker SHALL clone the target repository into `workspace/runs/<triggerId>/repo` using a token-authenticated HTTPS URL `https://x-access-token:${GITHUB_TOKEN}@github.com/${owner}/${name}`, and SHALL check out a new branch named `agent/<issue-number>-<slug>-<shortTriggerId>` where `slug` is the kebab-cased issue title truncated to 40 characters and `shortTriggerId` is the trailing 8 characters of the trigger's unix-ms timestamp.
+The worker SHALL clone the target repository into `workspace/runs/<triggerId>/repo` from the plain HTTPS URL `https://github.com/${owner}/${name}`, authenticating with `GITHUB_TOKEN` through an `http.extraheader` passed in `GIT_CONFIG_*` environment variables, and SHALL check out a new branch named `agent/<issue-number>-<slug>-<shortTriggerId>` where `slug` is the kebab-cased issue title truncated to 40 characters and `shortTriggerId` is the trailing 8 characters of the trigger's unix-ms timestamp.
 
 #### Scenario: Clone uses scoped token
 
 - **WHEN** the worker clones a whitelisted repo
-- **THEN** the remote URL embeds `GITHUB_TOKEN` as `x-access-token:<token>` and is never echoed to logs
+- **THEN** the token is sent only as an `http.extraheader` via environment variables, never appears in argv, logs, or the clone's `.git/config`, and the pipeline's environment contains no `GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_WEBHOOK_SECRET`
 
 #### Scenario: Branch name is collision-resistant
 

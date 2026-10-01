@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { run } from './exec';
+import { agentEnv, run } from './exec';
 import type { RunDirs } from './runWorkspace';
 import type { WorkerConfig } from './config';
 import type { TaskTrigger } from '../../shared/src/types';
@@ -27,7 +27,7 @@ export async function runPipeline(
   config: WorkerConfig,
 ): Promise<number> {
   const env: NodeJS.ProcessEnv = {
-    ...process.env,
+    ...agentEnv(),
     ANTHROPIC_API_KEY: config.anthropicApiKey,
     RUN_DIR: dirs.root,
     MAX_STAGE_RETRIES: String(config.maxStageRetries),

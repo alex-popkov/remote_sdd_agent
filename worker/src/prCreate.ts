@@ -1,12 +1,13 @@
 import { runOrThrow } from './exec';
+import { gitAuthEnv } from './gitOps';
 import type { TaskTrigger } from '../../shared/src/types';
 
 /**
  * Commit the working-tree changes, push the agent branch, and open a PR with
  * `gh`. Returns the PR URL printed by `gh pr create`.
  *
- * `gh` authenticates from GH_TOKEN in the environment. The push reuses the
- * token-embedded remote set up by cloneRepo, so no extra git auth is needed.
+ * `gh` authenticates from GH_TOKEN in the environment; the push authenticates
+ * via gitAuthEnv, since the clone's remote carries no credentials.
  * When `options.baseBranch` is set the PR targets it; otherwise `--base` is
  * omitted and `gh` defaults to the base repo's default branch.
  */
@@ -35,7 +36,10 @@ export async function createPr(
     '-m',
     `agent: ${trigger.issue.title} (closes #${trigger.issue.number})`,
   ], { cwd: repoDir });
-  await runOrThrow('git push', 'git', ['push', '-u', 'origin', branch], { cwd: repoDir });
+  await runOrThrow('git push', 'git', ['push', '-u', 'origin', branch], {
+    cwd: repoDir,
+    env: gitAuthEnv(githubToken),
+  });
 
   // `gh pr create --label` hard-fails if the label doesn't exist in the repo
   // ("could not add label: 'agent:created' not found"). Ensure it exists first;
