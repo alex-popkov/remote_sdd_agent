@@ -339,3 +339,7 @@ abandoned run `failed` and renames its directory to
 - [`openspec/changes/implement-remote-sdd-agent/`](./openspec/changes/implement-remote-sdd-agent/) — the implementation change: proposal, design decisions, per-capability specs, task list.
 - [`docs/agent-tuning.md`](./docs/agent-tuning.md) — editing agents, re-running one stage, inspecting cost.
 - [`pipeline/agents/readme.md`](./pipeline/agents/readme.md) — what each agent does.
+
+## License
+
+[MIT](./LICENSE) © 2026 Oleksandr Popkov
