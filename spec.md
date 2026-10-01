@@ -195,9 +195,13 @@ results.
       so artifacts persist outside the repo for the worker and observability
     - `logs/` — per-stage stdout + stderr
     - `run.json` — metadata (start, end, cost, tokens, stage results)
-3. **Clone** — use a token authenticated as the GitHub App:
-   `git clone https://x-access-token:${TOKEN}@github.com/${owner}/${name}`
-   on a new branch `agent/<issue-number>-<slug>`.
+3. **Clone** — `git clone https://github.com/${owner}/${name}` on a new
+   branch `agent/<issue-number>-<slug>`, authenticated as the GitHub App via
+   an `http.extraheader` passed in `GIT_CONFIG_*` env vars (the push does the
+   same). The token is never stored in the clone's `.git/config`, and
+   `GITHUB_TOKEN`/`GH_TOKEN`/`GITHUB_WEBHOOK_SECRET` are stripped from the
+   pipeline's environment: the agents run untrusted issue text and must not
+   be able to read them.
 4. **Run pipeline** — `bash /pipeline/pipeline.sh` with env vars pointing
    at the run dir. The pipeline is the contract; the worker just invokes it.
 5. **Open PR** — `gh pr create` with title, body templated from artifacts,

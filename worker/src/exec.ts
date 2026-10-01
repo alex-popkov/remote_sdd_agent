@@ -7,7 +7,7 @@ import fs from 'node:fs';
  * Always invoked with an argv array and no shell, so untrusted issue text
  * (titles, bodies) can never be interpreted by a shell. Callers are
  * responsible for not logging secrets — `run()` itself never logs the
- * command or its arguments (some carry a token-embedded URL).
+ * command or its arguments.
  */
 export interface RunResult {
   code: number;
@@ -22,6 +22,21 @@ export interface RunOptions {
   input?: string;
   /** Append combined stdout+stderr to this file (the stage/naive log). */
   logFile?: string;
+}
+
+/**
+ * Worker secrets withheld from agent sessions. The agent runs arbitrary shell
+ * commands on untrusted issue text (prompt injection), so it must not be able
+ * to read these. It never needs them: clone, push, PR creation and issue
+ * comments all run in the worker, outside the agent sessions.
+ */
+const AGENT_WITHHELD_ENV = ['GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_WEBHOOK_SECRET'];
+
+/** `env` minus AGENT_WITHHELD_ENV — the base environment for agent processes. */
+export function agentEnv(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const key of AGENT_WITHHELD_ENV) delete out[key];
+  return out;
 }
 
 export function run(

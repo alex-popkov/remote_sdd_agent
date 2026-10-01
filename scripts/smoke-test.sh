@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # Local smoke test for the receiver — no GitHub, no tunnel required.
 #
-# Exercises the full receiver → file-queue → worker pipe:
+# Exercises the receiver → file-queue pipe. The positive cases enqueue real
+# tasks for a whitelisted repo, so the worker is paused (docker compose pause)
+# for the duration and every task the smoke test enqueued is deleted on exit —
+# otherwise the worker would run the full pipeline and open real PRs.
+#
 #   1. /health is up
 #   2. signed label-trigger payload → 202 + file appears in pending/
 #   3. wrong signature                 → 401
 #   4. non-whitelisted repo            → 204
 #   5. [bot] sender                    → 204
-#   6. issue_comment with @bot mention → 202 (mention trigger)
+#   6. issue_comment with @bot mention from a COLLABORATOR → 202 (mention trigger)
+#   7. issue_comment with @bot mention from an untrusted author → 204
 #
 # Run with:  bash scripts/smoke-test.sh
 # Requires:  docker compose up running, .env populated, openssl on PATH.
+# Note: pausing freezes an in-flight pipeline run for a few seconds; it resumes
+# on unpause.
 
 set -euo pipefail
 
@@ -40,6 +47,23 @@ RECEIVER_URL="${RECEIVER_URL:-http://localhost:3000}"
 pass=0
 fail=0
 
+PENDING_DIR="$ROOT/workspace/queue/pending"
+# triggerIds the receiver returned for our 202 cases — deleted on exit.
+SMOKE_IDS=()
+WORKER_PAUSED=0
+
+cleanup() {
+  local id
+  for id in ${SMOKE_IDS[@]+"${SMOKE_IDS[@]}"}; do
+    rm -f "$PENDING_DIR/$id.json"
+  done
+  if [[ "$WORKER_PAUSED" == "1" ]]; then
+    docker compose unpause worker >/dev/null 2>&1 \
+      || echo "WARNING: failed to unpause worker — run: docker compose unpause worker" >&2
+  fi
+}
+trap cleanup EXIT
+
 # Compute X-Hub-Signature-256 over $1.
 sign() {
   printf '%s' "$1" \
@@ -64,6 +88,11 @@ check() {
     -H "X-GitHub-Delivery: $delivery" \
     -H "X-Hub-Signature-256: $sig" \
     --data "$body")
+  if [[ "$actual" == "202" ]]; then
+    local id
+    id=$(sed -n 's/.*"triggerId":"\([^"]*\)".*/\1/p' /tmp/smoke-body.$$)
+    [[ -n "$id" ]] && SMOKE_IDS+=("$id")
+  fi
   if [[ "$actual" == "$expected" ]]; then
     printf '  \e[32mPASS\e[0m  %s  (got %s)\n' "$name" "$actual"
     pass=$((pass+1))
@@ -86,12 +115,16 @@ else
   exit 1
 fi
 
-echo "==> Webhook cases"
+# Freeze the worker so it can't claim the tasks we enqueue before cleanup.
+if docker compose pause worker >/dev/null 2>&1; then
+  WORKER_PAUSED=1
+else
+  echo "ERROR: could not pause the worker (docker compose pause worker)." >&2
+  echo "       Refusing to run: positive cases would trigger real pipeline runs and PRs." >&2
+  exit 2
+fi
 
-# Snapshot pending/ count before the positive case so we can verify the file lands.
-PENDING_DIR="$ROOT/workspace/queue/pending"
-mkdir -p "$PENDING_DIR"
-before=$(find "$PENDING_DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
+echo "==> Webhook cases"
 
 # 1) Positive: issues.labeled with TRIGGER_LABEL on a whitelisted repo → 202
 body_label=$(cat <<JSON
@@ -117,31 +150,34 @@ JSON
 )
 check "[bot] sender is dropped" 204 issues "$body_bot"
 
-# 5) Positive: issue_comment.created with @<BOT_MENTION> → 202
+# 5) Positive: issue_comment.created with @<BOT_MENTION> from a trusted author → 202
 body_mention=$(cat <<JSON
-{"action":"created","repository":{"name":"$ALLOWED_NAME","owner":{"login":"$ALLOWED_OWNER"},"full_name":"$ALLOWED_FIRST"},"issue":{"number":2,"title":"smoke","body":"y","html_url":"https://x","user":{"login":"alice"}},"comment":{"body":"hey @$BOT_MENTION_EFFECTIVE please look","user":{"login":"alice"}},"sender":{"login":"alice"}}
+{"action":"created","repository":{"name":"$ALLOWED_NAME","owner":{"login":"$ALLOWED_OWNER"},"full_name":"$ALLOWED_FIRST"},"issue":{"number":2,"title":"smoke","body":"y","html_url":"https://x","user":{"login":"alice"}},"comment":{"body":"hey @$BOT_MENTION_EFFECTIVE please look","user":{"login":"alice"},"author_association":"COLLABORATOR"},"sender":{"login":"alice"}}
 JSON
 )
 check "mention trigger from comment" 202 issue_comment "$body_mention"
 
-after=$(find "$PENDING_DIR" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')
-delta=$((after - before))
+# 6) Negative: same mention from an untrusted author (author_association NONE) → 204
+body_mention_untrusted=$(cat <<JSON
+{"action":"created","repository":{"name":"$ALLOWED_NAME","owner":{"login":"$ALLOWED_OWNER"},"full_name":"$ALLOWED_FIRST"},"issue":{"number":2,"title":"smoke","body":"y","html_url":"https://x","user":{"login":"alice"}},"comment":{"body":"hey @$BOT_MENTION_EFFECTIVE please look","user":{"login":"mallory"},"author_association":"NONE"},"sender":{"login":"mallory"}}
+JSON
+)
+check "mention from untrusted author is dropped" 204 issue_comment "$body_mention_untrusted"
 
 echo "==> Queue state"
-printf '  pending/ delta: %s file(s) added since start\n' "$delta"
-if [[ "$delta" -ge 2 ]]; then
-  printf '  \e[32mPASS\e[0m  positive cases produced queue files (or worker has already drained — check done/ if 0)\n'
-  pass=$((pass+1))
-else
-  worker_drained=$(find "$ROOT/workspace/queue/done" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l | tr -d ' ')
-  if [[ "$worker_drained" -gt 0 ]]; then
-    printf '  \e[32mPASS\e[0m  no files in pending/, but %s in done/ — worker drained them\n' "$worker_drained"
+if [[ ${#SMOKE_IDS[@]} -ne 2 ]]; then
+  printf '  \e[31mFAIL\e[0m  expected 2 triggerIds from positive cases, got %s\n' "${#SMOKE_IDS[@]}"
+  fail=$((fail+1))
+fi
+for id in ${SMOKE_IDS[@]+"${SMOKE_IDS[@]}"}; do
+  if [[ -f "$PENDING_DIR/$id.json" ]]; then
+    printf '  \e[32mPASS\e[0m  %s landed in pending/ (removed on exit)\n' "$id"
     pass=$((pass+1))
   else
-    printf '  \e[31mFAIL\e[0m  expected >=2 new files in pending/ or done/, got pending+%s done=%s\n' "$delta" "$worker_drained"
+    printf '  \e[31mFAIL\e[0m  %s not found in pending/\n' "$id"
     fail=$((fail+1))
   fi
-fi
+done
 
 echo
 echo "==> Summary"

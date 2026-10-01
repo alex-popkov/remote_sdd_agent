@@ -2,12 +2,30 @@ import { runOrThrow } from './exec';
 import type { TaskTrigger } from '../../shared/src/types';
 
 /**
- * Git operations against the target repo. The clone URL embeds the GitHub
- * token; it is passed to `git` via an argv array (no shell) and is never
- * logged — see the note in exec.ts. Once cloned, the token lives in the
- * repo's `.git/config` remote, which is fine inside the ephemeral run dir
- * and lets `git push` reuse the same credential.
+ * Git operations against the target repo. The agent runs inside the clone,
+ * so the GitHub token must never be stored there: the remote URL is plain
+ * `https://github.com/<owner>/<name>` and each authenticated git call gets the
+ * token through gitAuthEnv() instead.
  */
+
+/**
+ * Environment that authenticates git's HTTPS requests to github.com, using
+ * config passed through env vars (GIT_CONFIG_COUNT, git >= 2.31) rather than
+ * a token-embedded URL. Nothing is written to `.git/config` and the token
+ * never appears in argv (visible in `ps`). Same header actions/checkout sets.
+ */
+export function gitAuthEnv(
+  githubToken: string,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const basic = Buffer.from(`x-access-token:${githubToken}`).toString('base64');
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+    GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${basic}`,
+  };
+}
 
 /** kebab-case a string and truncate to `max` chars (default 40). */
 export function kebab(input: string, max = 40): string {
@@ -33,14 +51,14 @@ export async function cloneRepo(
   baseBranch?: string,
 ): Promise<void> {
   const { owner, name } = trigger.repo;
-  const url = `https://x-access-token:${githubToken}@github.com/${owner}/${name}`;
+  const url = `https://github.com/${owner}/${name}`;
   // depth=1: the agent works against the branch tip; full history is
   // unnecessary and slower to fetch. With baseBranch set, clone that branch so
   // the agent — and the verifier — work against it instead of the repo default.
   const args = ['clone', '--depth', '1'];
   if (baseBranch) args.push('--branch', baseBranch);
   args.push(url, dest);
-  await runOrThrow('git clone', 'git', args);
+  await runOrThrow('git clone', 'git', args, { env: gitAuthEnv(githubToken) });
 }
 
 /**
